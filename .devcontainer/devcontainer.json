@@ -1,0 +1,36 @@
+{
+  "name": "Akashic MCP Dev",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-20-bullseye",
+
+  // コンテナ作成時に実行する機能（GitやSSHなど）
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+
+  // VS Codeのカスタマイズ設定
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": "explicit"
+        }
+      },
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker" // Docker管理用
+      ]
+    }
+  },
+
+  // コンテナ作成後に自動実行されるコマンド
+  // 1. 依存関係のインストール
+  // 2. Akashic CLIのグローバルインストール（これが重要です）
+  "postCreateCommand": "npm install && npm install -g @akashic/akashic-cli",
+
+  // ユーザー権限の設定（nodeユーザーとして実行）
+  "remoteUser": "node"
+}
