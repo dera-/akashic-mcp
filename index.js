@@ -409,7 +409,6 @@ ${genreInfo}
 - テンプレートに script/_bootstrap.js がある場合、このファイルはテンプレートのままで変更しないでください。
 - Akashic EngineのAPIを使うときはimportを使わず、接頭辞にg.をつけてください。
 - g.Scene#loadedやg.Scene#updateはv3では非推奨です。g.Scene#onLoadやg.Scene#onUpdateを使用してください。また、基本的にはv3で使用可能でも非推奨のAPIは使用しないようにしてください。
-- JavaScriptの場合、main.jsでは、main関数を定義して、コードの末尾に module.exports = main; を記載してください。
 - JavaScriptの場合、CommonJS形式且つES2015以降の記法でコードを作成してください。
 - g.Sceneにageは存在しません。ageを利用する場合はg.game.ageを利用してください。
 - g.gameにonLoad()などのトリガーは存在しません。onLoad()はg.Sceneのメソッドです。
