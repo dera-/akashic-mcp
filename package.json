@@ -5,18 +5,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",
+    "adm-zip": "^0.5.16",
     "axios": "^1.13.2",
     "cheerio": "^1.1.2",
     "glob": "^13.0.0",
     "turndown": "^7.2.2",
-    "zod": "^4.1.13"
+    "zod": "^3.23.8"
   }
 }

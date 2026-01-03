@@ -1,110 +1,229 @@
-// scripts/fetch-docs.js
-const axios = require('axios');
-const cheerio = require('cheerio');
-const TurndownService = require('turndown');
-const fs = require('fs');
-const path = require('path');
-const urlParser = require('url');
+// scripts/fetch-doc.js
+const axios = require("axios");
+const cheerio = require("cheerio");
+const TurndownService = require("turndown");
+const fs = require("fs");
+const path = require("path");
+const { exec } = require("child_process");
+const util = require("util");
+const zlib = require("zlib");
 
-// 設定
-const BASE_URL = 'https://akashic-games.github.io/';
-const OUTPUT_FILE = 'data/akashic_docs.json';
-const DELAY_MS = 500; // サーバー負荷軽減のための待機時間
+const BASE_URL = "https://akashic-games.github.io/";
+const SITEMAP_URL = `${BASE_URL}sitemap.xml`;
+const SEED_URLS = [BASE_URL];
+const OUTPUT_FILE = "data/akashic_docs.json";
+const DELAY_MS = 500;
+const USE_WGET = process.env.USE_WGET === "1";
+const WGET_MIRROR_DIR = process.env.WGET_MIRROR_DIR || "data/wget_mirror";
 
-// Markdown変換器の初期化
+const execAsync = util.promisify(exec);
+
 const turndownService = new TurndownService({
-	headingStyle: 'atx',
-	codeBlockStyle: 'fenced'
+  headingStyle: "atx",
+  codeBlockStyle: "fenced"
 });
 
-// 訪問済みURL管理
 const visited = new Set();
-const queue = [BASE_URL];
+const queue = [...SEED_URLS];
 const docs = [];
 
-// 指定時間待機する関数
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// URLを正規化する関数
 function normalizeUrl(link, currentUrl) {
-	try {
-		const absoluteUrl = new URL(link, currentUrl).href;
-		// アンカー(#)を除去
-		return absoluteUrl.split('#')[0];
-	} catch (e) {
-		return null;
-	}
+  try {
+    if (!link || link.startsWith("mailto:") || link.startsWith("javascript:")) {
+      return null;
+    }
+    const absoluteUrl = new URL(link, currentUrl).href;
+    return absoluteUrl.split("#")[0];
+  } catch {
+    return null;
+  }
+}
+
+function listHtmlFiles(dirPath) {
+  const results = [];
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...listHtmlFiles(fullPath));
+      continue;
+    }
+    if (entry.isFile() && /\.(html?|xhtml)$/i.test(entry.name)) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+function buildUrlFromFile(filePath, rootDir) {
+  let relative = path.relative(rootDir, filePath).split(path.sep).join("/");
+  if (relative.endsWith("index.html")) {
+    relative = relative.slice(0, -"index.html".length);
+  }
+  return new URL(relative, BASE_URL).href;
+}
+
+async function fetchSitemapXml(url) {
+  const response = await axios.get(url, {
+    headers: { "User-Agent": "AkashicMCP-Bot/1.0" },
+    responseType: "arraybuffer"
+  });
+  const contentType = response.headers["content-type"] || "";
+  const buffer = Buffer.from(response.data);
+  if (url.endsWith(".gz") || contentType.includes("gzip")) {
+    return zlib.gunzipSync(buffer).toString("utf-8");
+  }
+  return buffer.toString("utf-8");
+}
+
+async function loadSitemapSeeds() {
+  const urls = new Set();
+  const pending = [SITEMAP_URL];
+  const seen = new Set();
+
+  while (pending.length > 0) {
+    const sitemapUrl = pending.shift();
+    if (!sitemapUrl || seen.has(sitemapUrl)) continue;
+    seen.add(sitemapUrl);
+
+    try {
+      const xml = await fetchSitemapXml(sitemapUrl);
+      const $ = cheerio.load(xml, { xmlMode: true });
+
+      $("url > loc").each((_, el) => {
+        const loc = $(el).text().trim();
+        if (loc && loc.startsWith(BASE_URL)) {
+          urls.add(loc);
+        }
+      });
+
+      $("sitemap > loc").each((_, el) => {
+        const loc = $(el).text().trim();
+        if (loc && loc.startsWith(BASE_URL)) {
+          pending.push(loc);
+        }
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return Array.from(urls);
+}
+
+async function crawlWithWget() {
+  const mirrorDir = path.resolve(WGET_MIRROR_DIR);
+  fs.mkdirSync(mirrorDir, { recursive: true });
+  const command = [
+    "wget",
+    "--mirror",
+    "--page-requisites",
+    "--adjust-extension",
+    "--convert-links",
+    "--no-parent",
+    "--domains",
+    "akashic-games.github.io",
+    "--no-host-directories",
+    "--directory-prefix",
+    `"${mirrorDir}"`,
+    BASE_URL
+  ].join(" ");
+
+  console.log(`Running wget mirror to: ${mirrorDir}`);
+  await execAsync(command);
+
+  const htmlFiles = listHtmlFiles(mirrorDir);
+  console.log(`Parsing ${htmlFiles.length} mirrored HTML files...`);
+
+  for (const filePath of htmlFiles) {
+    const html = fs.readFileSync(filePath, "utf-8");
+    const $ = cheerio.load(html);
+    $("nav, footer, script, style, noscript, iframe, .site-header, .site-footer").remove();
+
+    const title = $("title").text().trim();
+    const htmlContent = $("body").html();
+    if (!htmlContent) continue;
+
+    const markdown = turndownService.turndown(htmlContent);
+    docs.push({
+      url: buildUrlFromFile(filePath, mirrorDir),
+      title,
+      content: markdown
+    });
+  }
+
+  console.log(`\nCompleted! Saving ${docs.length} pages to ${OUTPUT_FILE}...`);
+  fs.mkdirSync(path.dirname(OUTPUT_FILE), { recursive: true });
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(docs, null, 2), "utf-8");
+  console.log("Done.");
 }
 
 async function crawl() {
-	console.log(`Crawler started for: ${BASE_URL}`);
+  if (USE_WGET) {
+    await crawlWithWget();
+    return;
+  }
 
-	while (queue.length > 0) {
-		const currentUrl = queue.shift();
+  const sitemapSeeds = await loadSitemapSeeds();
+  for (const seed of sitemapSeeds) {
+    if (!visited.has(seed)) {
+      queue.push(seed);
+    }
+  }
+  console.log(`Crawler started. Seed count: ${SEED_URLS.length + sitemapSeeds.length}`);
 
-		if (visited.has(currentUrl)) continue;
-		visited.add(currentUrl);
+  while (queue.length > 0) {
+    const currentUrl = queue.shift();
+    if (!currentUrl || visited.has(currentUrl)) continue;
+    visited.add(currentUrl);
 
-		// ドメイン外には出ない & 特定の拡張子は無視
-		if (!currentUrl.startsWith(BASE_URL)) continue;
-		if (currentUrl.match(/\.(png|jpg|jpeg|gif|zip|pdf)$/i)) continue;
+    if (!currentUrl.startsWith(BASE_URL)) continue;
+    if (currentUrl.match(/\.(png|jpg|jpeg|gif|zip|pdf)$/i)) continue;
 
-		try {
-			console.log(`Fetching: ${currentUrl} (Queue: ${queue.length})`);
-			
-			const response = await axios.get(currentUrl, {
-				headers: { 'User-Agent': 'AkashicMCP-Bot/1.0' }
-			});
+    try {
+      console.log(`Fetching: ${currentUrl} (Queue: ${queue.length})`);
+      const response = await axios.get(currentUrl, {
+        headers: { "User-Agent": "AkashicMCP-Bot/1.0" }
+      });
 
-			// コンテンツタイプがHTMLでない場合はスキップ
-			const contentType = response.headers['content-type'];
-			if (!contentType || !contentType.includes('text/html')) continue;
+      const contentType = response.headers["content-type"];
+      if (!contentType || !contentType.includes("text/html")) continue;
 
-			const $ = cheerio.load(response.data);
+      const $ = cheerio.load(response.data);
+      $("nav, footer, script, style, noscript, iframe, .site-header, .site-footer").remove();
 
-			// 不要な要素（ナビゲーション、フッター、スクリプト）を削除
-			$('nav, footer, script, style, noscript, iframe, .site-header, .site-footer').remove();
+      const title = $("title").text().trim();
+      const htmlContent = $("body").html();
 
-			// メインコンテンツの抽出 (サイト構造に合わせて調整可能)
-			// Akashic公式サイトは特定のIDやクラスで囲まれていない場合もあるためbody全体から取得しつつ、不要タグを消す戦略
-			const title = $('title').text().trim();
-			const htmlContent = $('body').html();
+      if (htmlContent) {
+        const markdown = turndownService.turndown(htmlContent);
+        docs.push({
+          url: currentUrl,
+          title,
+          content: markdown
+        });
+      }
 
-			if (htmlContent) {
-				// Markdownに変換
-				const markdown = turndownService.turndown(htmlContent);
-				
-				// データを保存用配列に追加
-				docs.push({
-					url: currentUrl,
-					title: title,
-					content: markdown
-				});
-			}
+      $("a").each((_, element) => {
+        const href = $(element).attr("href");
+        const nextUrl = normalizeUrl(href, currentUrl);
+        if (nextUrl && !visited.has(nextUrl) && nextUrl.startsWith(BASE_URL)) {
+          queue.push(nextUrl);
+        }
+      });
 
-			// ページ内のリンクを収集してキューに追加
-			$('a').each((_, element) => {
-				const href = $(element).attr('href');
-				if (href) {
-					const nextUrl = normalizeUrl(href, currentUrl);
-					if (nextUrl && !visited.has(nextUrl) && nextUrl.startsWith(BASE_URL)) {
-						queue.push(nextUrl);
-					}
-				}
-			});
+      await sleep(DELAY_MS);
+    } catch (error) {
+      console.error(`Error fetching ${currentUrl}: ${error.message}`);
+    }
+  }
 
-			// サーバーに負荷をかけないよう待機
-			await sleep(DELAY_MS);
-
-		} catch (error) {
-			console.error(`Error fetching ${currentUrl}: ${error.message}`);
-		}
-	}
-
-	// JSONファイルとして書き出し
-	console.log(`\nCompleted! Saving ${docs.length} pages to ${OUTPUT_FILE}...`);
-	fs.writeFileSync(OUTPUT_FILE, JSON.stringify(docs, null, 2), 'utf-8');
-	console.log('Done.');
+  console.log(`\nCompleted! Saving ${docs.length} pages to ${OUTPUT_FILE}...`);
+  fs.mkdirSync(path.dirname(OUTPUT_FILE), { recursive: true });
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(docs, null, 2), "utf-8");
+  console.log("Done.");
 }
 
 crawl();
