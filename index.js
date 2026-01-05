@@ -330,7 +330,287 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 6: プロジェクトZIP作成 (zip_project_base64)
+		// Tool 6: Headless test (headless_akashic_test)
+	// ---------------------------------------------------------------
+	server.tool(
+		"headless_akashic_test",
+		"Run a headless-akashic test to validate scene and entity expectations.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			expectedSceneName: z.string().optional().describe("Expected scene name to assert."),
+			expectedEntityTypes: z.array(z.string()).optional().describe("Expected entity types, e.g. ['Sprite','Label']."),
+			expectedMinEntities: z.number().int().min(0).optional().describe("Minimum number of entities in the active scene."),
+			gameJsonPath: z.string().optional().describe("Path to game.json (relative to directoryName). Defaults to 'game.json'.")
+		},
+		async ({ directoryName, expectedSceneName, expectedEntityTypes, expectedMinEntities, gameJsonPath }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			if (!expectedSceneName && (!expectedEntityTypes || expectedEntityTypes.length === 0) && expectedMinEntities === undefined) {
+				return { content: [{ type: "text", text: "Error: Provide at least one expectation (scene name, entity types, or min entity count)." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const headlessModulePath = path.resolve(targetPath, "node_modules", "@akashic", "headless-akashic");
+			if (!fs.existsSync(headlessModulePath)) {
+				return { content: [{ type: "text", text: "Error: @akashic/headless-akashic is not installed in the project." }], isError: true };
+			}
+
+			const testDir = path.resolve(targetPath, ".mcp");
+			const testFilePath = path.resolve(testDir, "headless-test.js");
+			const resolvedGameJsonPath = path.resolve(
+				targetPath,
+				gameJsonPath && gameJsonPath.trim() ? gameJsonPath : "game.json"
+			);
+
+			if (!fs.existsSync(resolvedGameJsonPath)) {
+				return { content: [{ type: "text", text: `Error: game.json not found at ${resolvedGameJsonPath}.` }], isError: true };
+			}
+
+			try {
+				fs.mkdirSync(testDir, { recursive: true });
+				const testCode = [
+					"const assert = require(\"node:assert\");",
+					"const { GameContext } = require(\"@akashic/headless-akashic\");",
+					"",
+					"function parseJsonEnv(name, fallback) {",
+					"\tif (!process.env[name]) return fallback;",
+					"\ttry {",
+					"\t\treturn JSON.parse(process.env[name]);",
+					"\t} catch {",
+					"\t\treturn fallback;",
+					"\t}",
+					"}",
+					"",
+					"(async () => {",
+					"\tconst gameJsonPath = process.env.GAME_JSON_PATH;",
+					"\tif (!gameJsonPath) throw new Error(\"GAME_JSON_PATH is required\");",
+					"",
+					"\tconst expectedSceneName = process.env.EXPECTED_SCENE_NAME || \"\";",
+					"\tconst expectedEntityTypes = parseJsonEnv(\"EXPECTED_ENTITY_TYPES\", []);",
+					"\tconst expectedMinEntities = process.env.EXPECTED_MIN_ENTITIES ? Number(process.env.EXPECTED_MIN_ENTITIES) : null;",
+					"",
+					"\tconst context = new GameContext({ gameJsonPath });",
+					"\tconst client = await context.getGameClient();",
+					"\tconst game = client.game;",
+					"\tconst ageBefore = game.age;",
+					"\tawait client.advance();",
+					"\tconst ageAfter = game.age;",
+					"\tassert(ageAfter > ageBefore, \"g.game.age did not advance\");",
+					"\tawait client.advanceUntil(() => game.scene() && game.scene().loaded);",
+					"\tconst scene = game.scene();",
+					"\tassert(scene, \"Scene is not available\");",
+					"",
+					"\tif (expectedSceneName) {",
+					"\t\tassert.strictEqual(scene.name, expectedSceneName, \"Scene name mismatch\");",
+					"\t}",
+					"",
+					"\tif (expectedMinEntities !== null) {",
+					"\t\tassert(scene.children.length >= expectedMinEntities, \"Not enough entities in scene\");",
+					"\t}",
+					"",
+					"\tif (Array.isArray(expectedEntityTypes) && expectedEntityTypes.length > 0) {",
+					"\t\tfor (const typeName of expectedEntityTypes) {",
+					"\t\t\tconst ctor = client.g[typeName];",
+					"\t\t\tassert(ctor, `Unknown entity type: ${typeName}`);",
+					"\t\t\tconst found = scene.children.some((child) => child instanceof ctor);",
+					"\t\t\tassert(found, `Entity type not found in scene: ${typeName}`);",
+					"\t\t}",
+					"\t}",
+					"",
+					"\tawait context.destroy();",
+					"\tconsole.log(\"headless-akashic check passed\");",
+					"})().catch((err) => {",
+					"\tconsole.error(err && err.stack ? err.stack : String(err));",
+					"\tprocess.exit(1);",
+					"});",
+					""
+				].join("\n");
+
+				fs.writeFileSync(testFilePath, testCode);
+				const envParts = [
+					`GAME_JSON_PATH="${resolvedGameJsonPath}"`,
+					expectedSceneName ? `EXPECTED_SCENE_NAME="${expectedSceneName}"` : null,
+					expectedEntityTypes && expectedEntityTypes.length > 0
+						? `EXPECTED_ENTITY_TYPES='${JSON.stringify(expectedEntityTypes)}'`
+						: null,
+					typeof expectedMinEntities === "number"
+						? `EXPECTED_MIN_ENTITIES="${expectedMinEntities}"`
+						: null
+				].filter(Boolean);
+				const command = `cd "${targetPath}" && ${envParts.join(" ")} node "${testFilePath}"`;
+				const { stdout, stderr } = await execAsync(command);
+				const output = [stdout, stderr].filter(Boolean).join("\n");
+				return {
+					content: [{ type: "text", text: output || "headless-akashic check passed." }]
+				};
+			} catch (error) {
+				const message = error?.message || "Unknown error";
+				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				return {
+					content: [{ type: "text", text: `Error during headless test: ${message}${stdout}${stderr}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ---------------------------------------------------------------
+		// Tool 7: ESLint format (format_with_eslint)
+	// ---------------------------------------------------------------
+	server.tool(
+		"format_with_eslint",
+		"Format game source code using @akashic/eslint-config.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			targetGlob: z.string().optional().describe("Glob for files to format (default: 'script/**/*.js').")
+		},
+		async ({ directoryName, targetGlob }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const eslintConfigModule = path.resolve(targetPath, "node_modules", "@akashic", "eslint-config");
+			const eslintBin = path.resolve(targetPath, "node_modules", ".bin", "eslint");
+			if (!fs.existsSync(eslintConfigModule) || !fs.existsSync(eslintBin)) {
+				return { content: [{ type: "text", text: "Error: eslint or @akashic/eslint-config is not installed in the project." }], isError: true };
+			}
+
+			try {
+				const configPath = path.resolve(targetPath, ".mcp-eslint.config.cjs");
+				const configCode = [
+					"const eslintConfig = require(\"@akashic/eslint-config\");",
+					"",
+					"module.exports = [",
+					"\t...eslintConfig,",
+					"\t{",
+					"\t\tfiles: [\"**/*.{js,mjs,cjs,ts}\"],",
+					"\t\tlanguageOptions: {",
+					"\t\t\tsourceType: \"module\"",
+					"\t\t}",
+					"\t}",
+					"];",
+					""
+				].join("\n");
+
+				fs.writeFileSync(configPath, configCode);
+				const glob = targetGlob && targetGlob.trim() ? targetGlob : "script/**/*.js";
+				const command = `cd "${targetPath}" && "${eslintBin}" --config "${configPath}" --fix ${glob}`;
+				const { stdout, stderr } = await execAsync(command);
+				const output = [stdout, stderr].filter(Boolean).join("\n");
+				return {
+					content: [{ type: "text", text: output || "ESLint formatting completed." }]
+				};
+			} catch (error) {
+				const message = error?.message || "Unknown error";
+				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				return {
+					content: [{ type: "text", text: `Error during ESLint formatting: ${message}${stdout}${stderr}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 8: Write README (write_project_readme)
+	// ---------------------------------------------------------------
+	server.tool(
+		"write_project_readme",
+		"Write a README.md describing the game in the specified project directory.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			title: z.string().describe("Game title for the README."),
+			summary: z.string().describe("Short overview of the game."),
+			features: z.array(z.string()).optional().describe("Bullet list of features."),
+			controls: z.array(z.string()).optional().describe("Bullet list of controls."),
+			rules: z.array(z.string()).optional().describe("Bullet list of rules."),
+			runtime: z.string().optional().describe("Runtime or environment notes (e.g., Akashic Engine).")
+		},
+		async ({ directoryName, title, summary, features, controls, rules, runtime }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const lines = [];
+			lines.push(`# ${title}`);
+			lines.push("");
+			lines.push(summary);
+
+			if (runtime && runtime.trim()) {
+				lines.push("");
+				lines.push("## Runtime");
+				lines.push(runtime.trim());
+			}
+
+			if (features && features.length > 0) {
+				lines.push("");
+				lines.push("## Features");
+				for (const item of features) {
+					lines.push(`- ${item}`);
+				}
+			}
+
+			if (controls && controls.length > 0) {
+				lines.push("");
+				lines.push("## Controls");
+				for (const item of controls) {
+					lines.push(`- ${item}`);
+				}
+			}
+
+			if (rules && rules.length > 0) {
+				lines.push("");
+				lines.push("## Rules");
+				for (const item of rules) {
+					lines.push(`- ${item}`);
+				}
+			}
+
+			try {
+				const readmePath = path.resolve(targetPath, "README.md");
+				fs.writeFileSync(readmePath, `${lines.join("\n")}\n`);
+				return {
+					content: [{ type: "text", text: "README.md written successfully." }]
+				};
+			} catch (error) {
+				const message = error?.message || "Unknown error";
+				return {
+					content: [{ type: "text", text: `Error writing README.md: ${message}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 9: Project zip (zip_project_base64)
 	// ---------------------------------------------------------------
 	server.tool(
 		"zip_project_base64",
@@ -390,13 +670,16 @@ async function createMcpServer() {
 ${genreInfo}
 
 **開発ガイドライン:**
-1. **情報収集**: まず 'search_akashic_docs' を使用し、実装に必要なAPI（例: 音声再生、当たり判定、乱数生成）の最新仕様を確認してください。
+1. **情報収集**: まず 'search_akashic_docs' を使用し、実装に必要なAPI（例: 音声再生、当たり判定、乱数生成）の最新仕様やニコ生ゲームの作成方法を確認してください。
 2. **プロジェクト作成**: プロジェクトが存在しない場合、ユーザーに確認の上 'init_project' を提案・実行してください（推奨テンプレート: typescript-shin-ichiba-ranking）。
 3. **実装**: 'create_game_file' を使用してコードを作成してください。
 	 - main.ts (またはmain.js) にロジックを記述します。
-	   - main.ts (またはmain.js)のコード量が多くなるのであれば、エンティティやシーンなどのオブジェクトやutil関数を別ファイルに切り出してください。
-	 - ランキングゲームを作成する場合は、「ランキングゲーム | Akashic Engine」(https://akashic-games.github.io/shin-ichiba/ranking/) を参考にして、そこに書かれている要求仕様を満たしてください。
+	   - 'init_project' や 'init_minimal_template' でテンプレートを生成した場合、main.ts (またはmain.js)の main() 関数の export 方法は変えず、main() 関数の中身を修正してください。
+	   - main.ts (またはmain.js)のステップ数が500行を超えるのであれば、エンティティやシーンなどのオブジェクトやutil関数を別ファイルに切り出してください。
+	 - ランキングゲームを作成する場合は、「ランキングゲーム | Akashic Engine」(https://akashic-games.github.io/shin-ichiba/ranking/) を参考にしてください。
+	 - 'format_with_eslint' を使用して作成したコードを整形してください。
 4. **game.json更新**: 'akashic_scan_asset' を使用してgame.jsonを更新してください。
+5. **ゲームデバッグ**: 'headless_akashic_test' でテストが通ることを確認してください。テストが通らない場合は コードを修正してください。
 
 **コード品質:**
 - 可読性の高いコードを記述してください。
@@ -406,13 +689,16 @@ ${genreInfo}
 **Akashic Engine 利用の際の注意点:**
 - Akashic Engine v3系のAPIを使用してください。
 - game.json については、何かしら指定がない限り基本的にはテンプレートのままで変更しないでください。
-- テンプレートに script/_bootstrap.js がある場合、このファイルはテンプレートのままで変更しないでください。
 - Akashic EngineのAPIを使うときはimportを使わず、接頭辞にg.をつけてください。
 - g.Scene#loadedやg.Scene#updateはv3では非推奨です。g.Scene#onLoadやg.Scene#onUpdateを使用してください。また、基本的にはv3で使用可能でも非推奨のAPIは使用しないようにしてください。
 - JavaScriptの場合、CommonJS形式且つES2015以降の記法でコードを作成してください。
 - g.Sceneにageは存在しません。ageを利用する場合はg.game.ageを利用してください。
 - g.gameにonLoad()などのトリガーは存在しません。onLoad()はg.Sceneのメソッドです。
 - g.Labelを使用する場合、特に指定が無ければ g.DynamicFont を生成して、g.Labelのfontプロパティに指定してください。
+  - g.DynamicFont 生成時は、game, size, fontFamily をそれぞれ指定してください。fontFamilyとして以下の文字列のうち、いずれかを使用してください
+    - "sans-serif"
+    - "serif"
+    - "monospace"
   - フォントデータ(フォント画像、フォントの設定が書かれたテキスト)を指定された場合は、そのデータの g.BitmapFont を生成・使用してください。
 `
 						}

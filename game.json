@@ -1,0 +1,12 @@
+{
+  "width": 640,
+  "height": 360,
+  "fps": 30,
+  "main": "script/main.js",
+  "assets": {},
+  "globalScripts": [],
+  "operationPlugins": [],
+  "environment": {
+    "sandbox-runtime": { "supportsSnapshot": true }
+  }
+}
