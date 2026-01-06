@@ -3,6 +3,8 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { z } from "zod";
+import axios from "axios";
+import cheerio from "cheerio";
 import AdmZip from "adm-zip";
 import fs from 'fs';
 import path from 'path';
@@ -330,7 +332,321 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-		// Tool 6: Headless test (headless_akashic_test)
+	// Tool 6: Install extension (akashic_install_extension)
+	// ---------------------------------------------------------------
+	server.tool(
+		"akashic_install_extension",
+		"Install Akashic extension libraries via 'akashic install' (only @akashic or @akashic-extension scope).",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			packages: z.array(z.string()).min(1).describe("Packages to install (must be @akashic/* or @akashic-extension/*)."),
+		},
+		async ({ directoryName, packages }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const invalid = packages.filter(
+				(name) => !/^@akashic(-extension)?\\//.test(name)
+			);
+			if (invalid.length > 0) {
+				return {
+					content: [{ type: "text", text: `Error: Invalid package scope: ${invalid.join(", ")}` }],
+					isError: true,
+				};
+			}
+
+			try {
+				const command = `cd "${targetPath}" && akashic install ${packages.map((p) => `"${p}"`).join(" ")}`;
+				const { stdout, stderr } = await execAsync(command);
+				const output = [stdout, stderr].filter(Boolean).join("\n");
+				return {
+					content: [{ type: "text", text: output || "akashic install completed." }]
+				};
+			} catch (error) {
+				const message = error?.message || "Unknown error";
+				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				return {
+					content: [{ type: "text", text: `Error during akashic install: ${message}${stdout}${stderr}` }],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 6: External asset import (import_external_assets)
+	// ---------------------------------------------------------------
+	server.tool(
+		"import_external_assets",
+		"Download free assets from approved sites and import into the project.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			assets: z.array(z.object({
+				url: z.string().describe("Direct asset file URL."),
+				type: z.enum(["image", "audio"]).describe("Asset type."),
+				fileName: z.string().optional().describe("Optional file name override."),
+				credit: z.object({
+					title: z.string().describe("Asset title."),
+					author: z.string().describe("Author name."),
+					sourceUrl: z.string().describe("Source page URL."),
+					license: z.string().describe("License name.")
+				}).optional().describe("Credit information to append to README.")
+			})).optional().describe("Assets to download and import."),
+			sourcePageUrl: z.string().optional().describe("Asset page URL to extract links from."),
+			keyword: z.string().optional().describe("Keyword to filter assets found on the page."),
+			maxResults: z.number().int().min(1).optional().describe("Maximum number of assets to download from the page."),
+			creditDefaults: z.object({
+				author: z.string().describe("Default author name."),
+				license: z.string().describe("Default license name."),
+				sourceUrl: z.string().optional().describe("Default source URL."),
+				titlePrefix: z.string().optional().describe("Prefix for generated titles.")
+			}).optional().describe("Default credit values for extracted assets.")
+		},
+		async ({ directoryName, assets, sourcePageUrl, keyword, maxResults, creditDefaults }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const allowedHosts = new Set([
+				"commons.nicovideo.jp",
+				"www.irasutoya.com",
+				"irasutoya.com",
+				"kenney.nl",
+				"www.kenney.nl",
+				"opengameart.org",
+				"www.opengameart.org",
+				"pipoya.net",
+				"www.pipoya.net",
+				"soundeffect-lab.info",
+				"www.soundeffect-lab.info",
+				"maou.audio",
+				"www.maou.audio",
+				"game-icons.net",
+				"www.game-icons.net"
+			]);
+			const isAllowedHost = (host) => {
+				if (!host) return false;
+				if (allowedHosts.has(host)) return true;
+				for (const base of allowedHosts) {
+					if (host.endsWith(`.${base}`)) return true;
+				}
+				return false;
+			};
+
+			const extractAssetsFromPage = async (pageUrl) => {
+				let parsedPageUrl = null;
+				try {
+					parsedPageUrl = new URL(pageUrl);
+				} catch {
+					throw new Error(`Invalid sourcePageUrl: ${pageUrl}`);
+				}
+
+				if (!isAllowedHost(parsedPageUrl.hostname)) {
+					throw new Error(`URL host not allowed: ${parsedPageUrl.hostname}`);
+				}
+
+				const response = await axios.get(pageUrl, { headers: { "User-Agent": "AkashicMCP-Bot/1.0" } });
+				const $ = cheerio.load(response.data);
+				const candidates = [];
+				const addCandidate = (url, type, context) => {
+					if (!url) return;
+					let absolute = null;
+					try {
+						absolute = new URL(url, pageUrl).href.split("#")[0];
+					} catch {
+						return;
+					}
+					candidates.push({ url: absolute, type, context: context || "" });
+				};
+
+				$("img").each((_, el) => {
+					const src = $(el).attr("src") || $(el).attr("data-src") || $(el).attr("data-original");
+					const context = [$(el).attr("alt"), $(el).attr("title"), $(el).closest("a").text()].filter(Boolean).join(" ");
+					addCandidate(src, "image", context);
+				});
+
+				$("a").each((_, el) => {
+					const href = $(el).attr("href");
+					const context = $(el).text() || "";
+					addCandidate(href, "image", context);
+					addCandidate(href, "audio", context);
+				});
+
+				$("source").each((_, el) => {
+					const src = $(el).attr("src");
+					const context = $(el).closest("audio").text() || "";
+					addCandidate(src, "audio", context);
+				});
+
+				return candidates;
+			};
+
+			const imageDir = path.resolve(targetPath, "image");
+			const audioDir = path.resolve(targetPath, "audio");
+			fs.mkdirSync(imageDir, { recursive: true });
+			fs.mkdirSync(audioDir, { recursive: true });
+
+			const creditLines = [];
+			const downloadedFiles = [];
+			let assetRequests = Array.isArray(assets) ? [...assets] : [];
+
+			if (sourcePageUrl) {
+				let candidates = [];
+				try {
+					candidates = await extractAssetsFromPage(sourcePageUrl);
+				} catch (error) {
+					const message = error?.message || "Unknown error";
+					return { content: [{ type: "text", text: `Error extracting assets: ${message}` }], isError: true };
+				}
+
+				const keywordLower = keyword ? keyword.toLowerCase() : null;
+				if (keywordLower) {
+					candidates = candidates.filter((c) => {
+						const text = `${c.url} ${c.context}`.toLowerCase();
+						return text.includes(keywordLower);
+					});
+				}
+
+				if (typeof maxResults === "number") {
+					candidates = candidates.slice(0, maxResults);
+				}
+
+				for (const candidate of candidates) {
+					const ext = path.extname(new URL(candidate.url).pathname).toLowerCase();
+					if (candidate.type === "image" && ![".png", ".jpg", ".jpeg"].includes(ext)) continue;
+					if (candidate.type === "audio" && ![".m4a", ".ogg", ".aac", ".wav", ".mp3", ".mp4"].includes(ext)) continue;
+					assetRequests.push({
+						url: candidate.url,
+						type: candidate.type
+					});
+				}
+			}
+
+			if (assetRequests.length === 0) {
+				return { content: [{ type: "text", text: "Error: No assets specified or found on the page." }], isError: true };
+			}
+
+			for (const asset of assetRequests) {
+				let parsedUrl = null;
+				try {
+					parsedUrl = new URL(asset.url);
+				} catch {
+					return { content: [{ type: "text", text: `Error: Invalid URL: ${asset.url}` }], isError: true };
+				}
+
+				if (!isAllowedHost(parsedUrl.hostname)) {
+					return { content: [{ type: "text", text: `Error: URL host not allowed: ${parsedUrl.hostname}` }], isError: true };
+				}
+
+				const defaultName = path.basename(parsedUrl.pathname);
+				const fileName = asset.fileName && asset.fileName.trim() ? asset.fileName.trim() : defaultName;
+				if (!fileName) {
+					return { content: [{ type: "text", text: `Error: Unable to determine file name for ${asset.url}` }], isError: true };
+				}
+
+				const ext = path.extname(fileName).toLowerCase();
+				if (asset.type === "image" && ![".png", ".jpg", ".jpeg"].includes(ext)) {
+					return { content: [{ type: "text", text: "Error: Image format must be png or jpg." }], isError: true };
+				}
+				if (asset.type === "audio" && ![".m4a", ".ogg", ".aac", ".wav", ".mp3", ".mp4"].includes(ext)) {
+					return { content: [{ type: "text", text: "Error: Unsupported audio format." }], isError: true };
+				}
+
+				const outDir = asset.type === "image" ? imageDir : audioDir;
+				const outPath = path.resolve(outDir, fileName);
+
+				try {
+					const response = await axios.get(asset.url, { responseType: "arraybuffer" });
+					fs.writeFileSync(outPath, Buffer.from(response.data));
+					downloadedFiles.push(outPath);
+				} catch (error) {
+					const message = error?.message || "Unknown error";
+					return { content: [{ type: "text", text: `Error downloading ${asset.url}: ${message}` }], isError: true };
+				}
+
+				if (asset.type === "audio" && ![".m4a", ".ogg"].includes(ext)) {
+					try {
+						const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
+						const completeAudioCmd = fs.existsSync(localBin) ? `"${localBin}"` : "complete-audio";
+						const command = `cd "${audioDir}" && ${completeAudioCmd} "${outPath}" -f`;
+						await execAsync(command);
+					} catch (error) {
+						const message = error?.message || "Unknown error";
+						return { content: [{ type: "text", text: `Error converting audio with complete-audio: ${message}` }], isError: true };
+					}
+				}
+
+				let credit = asset.credit;
+				if (!credit) {
+					if (creditDefaults) {
+						const baseTitle = creditDefaults.titlePrefix
+							? `${creditDefaults.titlePrefix}${fileName}`
+							: fileName;
+						credit = {
+							title: baseTitle,
+							author: creditDefaults.author,
+							sourceUrl: creditDefaults.sourceUrl || sourcePageUrl || asset.url,
+							license: creditDefaults.license
+						};
+					} else {
+						return { content: [{ type: "text", text: `Error: Credit is required for ${asset.url}` }], isError: true };
+					}
+				}
+
+				if (credit) {
+					creditLines.push(`- ${credit.title} / ${credit.author} / ${credit.sourceUrl} / ${credit.license}`);
+				}
+			}
+
+			if (creditLines.length > 0) {
+				const readmePath = path.resolve(targetPath, "README.md");
+				const section = ["", "## Credits", ...creditLines, ""].join("\n");
+				try {
+					if (fs.existsSync(readmePath)) {
+						fs.appendFileSync(readmePath, `${section}\n`);
+					} else {
+						fs.writeFileSync(readmePath, `# Assets\n${section}\n`);
+					}
+				} catch (error) {
+					const message = error?.message || "Unknown error";
+					return { content: [{ type: "text", text: `Error writing README credits: ${message}` }], isError: true };
+				}
+			}
+
+			try {
+				const command = `cd "${targetPath}" && akashic scan asset`;
+				await execAsync(command);
+			} catch (error) {
+				const message = error?.message || "Unknown error";
+				return { content: [{ type: "text", text: `Error during akashic scan asset: ${message}` }], isError: true };
+			}
+
+			return {
+				content: [{ type: "text", text: `Imported ${downloadedFiles.length} assets and updated game.json.` }]
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 7: Headless test (headless_akashic_test)
 	// ---------------------------------------------------------------
 	server.tool(
 		"headless_akashic_test",
@@ -465,7 +781,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-		// Tool 7: ESLint format (format_with_eslint)
+		// Tool 8: ESLint format (format_with_eslint)
 	// ---------------------------------------------------------------
 	server.tool(
 		"format_with_eslint",
@@ -531,7 +847,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 8: Write README (write_project_readme)
+	// Tool 9: Write README (write_project_readme)
 	// ---------------------------------------------------------------
 	server.tool(
 		"write_project_readme",
@@ -610,7 +926,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 9: Project zip (zip_project_base64)
+	// Tool 10: Project zip (zip_project_base64)
 	// ---------------------------------------------------------------
 	server.tool(
 		"zip_project_base64",
