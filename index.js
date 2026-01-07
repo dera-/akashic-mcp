@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { z } from "zod";
 import axios from "axios";
-import cheerio from "cheerio";
+import { load as loadCheerio } from "cheerio";
 import AdmZip from "adm-zip";
 import fs from 'fs';
 import path from 'path';
@@ -216,9 +216,9 @@ async function createMcpServer() {
 				};
 
 			} catch (error) {
-				const message = error?.message || "Unknown error";
-				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error during initialization: ${message}${stdout}${stderr}` }],
 					isError: true,
@@ -281,7 +281,7 @@ async function createMcpServer() {
 					}]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
+				const message = error && error.message ? error.message : "Unknown error";
 				return {
 					content: [{ type: "text", text: `Error during template initialization: ${message}` }],
 					isError: true,
@@ -320,9 +320,9 @@ async function createMcpServer() {
 					content: [{ type: "text", text: output || "akashic scan asset completed." }]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
-				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error during asset scan: ${message}${stdout}${stderr}` }],
 					isError: true,
@@ -355,7 +355,7 @@ async function createMcpServer() {
 			}
 
 			const invalid = packages.filter(
-				(name) => !/^@akashic(-extension)?\\//.test(name)
+				(name) => !/^@akashic(-extension)?\//.test(name)
 			);
 			if (invalid.length > 0) {
 				return {
@@ -372,9 +372,9 @@ async function createMcpServer() {
 					content: [{ type: "text", text: output || "akashic install completed." }]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
-				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error during akashic install: ${message}${stdout}${stderr}` }],
 					isError: true,
@@ -440,7 +440,8 @@ async function createMcpServer() {
 				"maou.audio",
 				"www.maou.audio",
 				"game-icons.net",
-				"www.game-icons.net"
+				"www.game-icons.net",
+				"blogger.googleusercontent.com"
 			]);
 			const isAllowedHost = (host) => {
 				if (!host) return false;
@@ -464,7 +465,7 @@ async function createMcpServer() {
 				}
 
 				const response = await axios.get(pageUrl, { headers: { "User-Agent": "AkashicMCP-Bot/1.0" } });
-				const $ = cheerio.load(response.data);
+				const $ = loadCheerio(response.data);
 				const candidates = [];
 				const addCandidate = (url, type, context) => {
 					if (!url) return;
@@ -513,7 +514,7 @@ async function createMcpServer() {
 				try {
 					candidates = await extractAssetsFromPage(sourcePageUrl);
 				} catch (error) {
-					const message = error?.message || "Unknown error";
+					const message = error && error.message ? error.message : "Unknown error";
 					return { content: [{ type: "text", text: `Error extracting assets: ${message}` }], isError: true };
 				}
 
@@ -578,7 +579,7 @@ async function createMcpServer() {
 					fs.writeFileSync(outPath, Buffer.from(response.data));
 					downloadedFiles.push(outPath);
 				} catch (error) {
-					const message = error?.message || "Unknown error";
+					const message = error && error.message ? error.message : "Unknown error";
 					return { content: [{ type: "text", text: `Error downloading ${asset.url}: ${message}` }], isError: true };
 				}
 
@@ -589,7 +590,7 @@ async function createMcpServer() {
 						const command = `cd "${audioDir}" && ${completeAudioCmd} "${outPath}" -f`;
 						await execAsync(command);
 					} catch (error) {
-						const message = error?.message || "Unknown error";
+						const message = error && error.message ? error.message : "Unknown error";
 						return { content: [{ type: "text", text: `Error converting audio with complete-audio: ${message}` }], isError: true };
 					}
 				}
@@ -626,7 +627,7 @@ async function createMcpServer() {
 						fs.writeFileSync(readmePath, `# Assets\n${section}\n`);
 					}
 				} catch (error) {
-					const message = error?.message || "Unknown error";
+					const message = error && error.message ? error.message : "Unknown error";
 					return { content: [{ type: "text", text: `Error writing README credits: ${message}` }], isError: true };
 				}
 			}
@@ -635,7 +636,7 @@ async function createMcpServer() {
 				const command = `cd "${targetPath}" && akashic scan asset`;
 				await execAsync(command);
 			} catch (error) {
-				const message = error?.message || "Unknown error";
+				const message = error && error.message ? error.message : "Unknown error";
 				return { content: [{ type: "text", text: `Error during akashic scan asset: ${message}` }], isError: true };
 			}
 
@@ -769,9 +770,9 @@ async function createMcpServer() {
 					content: [{ type: "text", text: output || "headless-akashic check passed." }]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
-				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error during headless test: ${message}${stdout}${stderr}` }],
 					isError: true,
@@ -835,9 +836,9 @@ async function createMcpServer() {
 					content: [{ type: "text", text: output || "ESLint formatting completed." }]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
-				const stdout = error?.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error?.stderr ? `\nStderr: ${error.stderr}` : "";
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error during ESLint formatting: ${message}${stdout}${stderr}` }],
 					isError: true,
@@ -916,7 +917,7 @@ async function createMcpServer() {
 					content: [{ type: "text", text: "README.md written successfully." }]
 				};
 			} catch (error) {
-				const message = error?.message || "Unknown error";
+				const message = error && error.message ? error.message : "Unknown error";
 				return {
 					content: [{ type: "text", text: `Error writing README.md: ${message}` }],
 					isError: true,
@@ -1038,7 +1039,10 @@ function getSessionId(req, url) {
 	if (Array.isArray(header) && header.length > 0) {
 		return header[0];
 	}
-	const querySession = url?.searchParams?.get("sessionId") || url?.searchParams?.get("session_id");
+	let querySession = null;
+	if (url && url.searchParams) {
+		querySession = url.searchParams.get("sessionId") || url.searchParams.get("session_id");
+	}
 	if (querySession && querySession.trim()) {
 		return querySession.trim();
 	}
@@ -1151,7 +1155,7 @@ async function main() {
 					}
 					return sendJson(res, 500, { error: "SSE transport does not support POST handling." });
 				} catch (error) {
-					const message = error?.message || "Failed to process MCP message.";
+					const message = error && error.message ? error.message : "Failed to process MCP message.";
 					console.error("MCP message error:", message);
 					return sendJson(res, 400, { error: message });
 				}
