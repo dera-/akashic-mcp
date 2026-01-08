@@ -1022,6 +1022,108 @@ ${genreInfo}
 		}
 	);
 
+	// ---------------------------------------------------------------
+	// Prompt: ニコ生ゲーム実装者 (implement_niconama_game)
+	// ---------------------------------------------------------------
+	server.prompt(
+		"implement_niconama_game",
+		"Implementation guidance for Niconico Live Games (Akashic Engine).",
+		{
+			targetDir: z.string().describe("Fixed output directory path."),
+			genre: z.string().optional().describe("Genre or idea (e.g. 'puzzle', 'action', 'shooting')."),
+		},
+		({ targetDir, genre }) => {
+			const genreInfo = genre ? `Target Genre: ${genre}` : "Target Genre: Any";
+			return {
+				messages: [
+					{
+						role: "user",
+						content: {
+							type: "text",
+							text: `あなたは**ニコニコ生放送ゲーム**の実装担当者です。以下のガイドラインに従ってください。
+${genreInfo}
+
+## 開発ガイドライン
+1. **まず調査**：実装に必要な最新の API 仕様（例：音声再生、当たり判定、乱数など）と、ニコニコ生放送ゲーム側の要件を確認するために、search_akashic_docs を使用すること。
+2. **出力ディレクトリ固定**：生成物は必ずこの固定パスに出力すること：${targetDir}
+3. **プロジェクト作成**：プロジェクトが存在しない場合は init_project を実行する。
+   * 明示指定がない限り、ゲーム形式に応じて templateType を選ぶ：
+     * ランキング：javascript-shin-ichiba-ranking
+     * マルチプレイ：javascript-multi
+     * それ以外：javascript
+   * プロジェクトが TypeScript の場合は skipNpmInstall を false、それ以外は true にする。
+   * init_project が失敗した場合は、代わりに init_minimal_template を実行する。
+4. **仕様／ルール／演出の定義**：ゲームの仕様・ルール・見せ方（演出）を要約する。未指定なら提案する。
+   * **二段階生成**：Phase 1 では最小限の動くゲーム（MVP）のみ実装し、演出や追加機能は Phase 2 で明示的に依頼された場合のみ追加する。
+   * 既存プロジェクトで生成履歴がない場合は、ソースコードや README から仕様を推測する。
+   * 素材の入手元が指定されている場合は、import_external_assets を使ってダウンロードし配置する。
+   * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
+5. **実装**：コードを書く際は create_game_file を使用する。
+   * ディレクトリ構成：
+     * script：ゲームロジック（JavaScript / CommonJS）
+     * image：画像
+     * audio：音声
+     * text：テキスト
+     * game.json
+   * ロジックは main.ts または main.js に実装する。
+     * main.ts / main.js が 500 行を超える場合は、クラスや関数を別ファイルに分割する。
+       * クラス例：シーン、エンティティ
+       * 関数例：ユーティリティ関数、API
+   * ランキングゲームの場合は、「Ranking Game | Akashic Engine」（[https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。)
+   * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
+   * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
+   * 明示的に必要と言われない限り game.json を変更しない。
+6. **game.json の更新**：新規・変更されたアセット、または新しいスクリプトを追加した場合のみ akashic_scan_asset を使う。
+7. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
+
+## コード品質
+* 読みやすいコードを書くこと。
+* 必要なコメントを付けること。
+* エラーを適切に扱うこと（例：アセット読み込み待ちなど）。
+
+## 実装上の注意
+* JavaScript は **CommonJS** と **ES2015+** 構文を使用する。
+* Akashic Engine v3 の API を使用する。
+* Akashic API は import を使わず、g. プレフィックスで利用する。
+* g.Scene#loaded と g.Scene#update は v3 では非推奨。g.Scene#onLoad と g.Scene#onUpdate を使う。
+* g.Scene には age がない。必要なら g.game.age を使う。
+* g.game には onLoad() のトリガーはない。onLoad() は g.Scene のメソッド。
+* g.Label は指定がなければ g.DynamicFont を生成して label.font に設定する。
+  * g.DynamicFont を作るときは game、size、fontFamily を設定し、fontFamily は次のいずれかを使う：
+    * "sans-serif"
+    * "serif"
+    * "monospace"
+  * フォントデータ（フォント画像＋設定テキスト）が提供されている場合は g.BitmapFont を作成して使用する。
+* g.Scene を作るときは game に g.game を設定する。
+  * シーン内でアセットを使う場合は assetPaths を指定する。参考：
+    * [https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html)
+    * [https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html)
+* シーン切り替えについては以下を参照：
+  * [https://akashic-games.github.io/reverse-reference/v3/logic/scene.html](https://akashic-games.github.io/reverse-reference/v3/logic/scene.html)
+* javascript-shin-ichiba-ranking（または script/_bootstrap.js が存在する場合）について：
+  * game.json の main は変更しない。
+  * script/_bootstrap.js を変更・削除しない。
+  * script/main.js は次の形式でエクスポートすること：module.exports.main = function main(param) { ... }
+  * 次の形式は使用しない：module.exports = function main(...) { ... }
+* game.json は基本的にテンプレートまたは既存プロジェクトのまま維持する。
+  * 手動編集を許可するのは以下の場合のみ：
+    * アセットをグローバル化する（"global": true を追加）
+    * type: "audio" のアセットの systemId を変更する
+    * ランキングの制限時間を変更する（environment.nicolive.preferredSessionParameters.totalTimeLimit）
+      * totalTimeLimit は秒単位（例：90 は 90 秒）
+  * 変更が必要な場合は以下を参照：
+    * [https://akashic-games.github.io/reference/manifest/game-json.html](https://akashic-games.github.io/reference/manifest/game-json.html)
+    * main キーは ./ を含める必要がある（例："./script/_bootstrap.js"）
+    * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
+    * type: "script" のアセットはグローバルである必要がある（"global": true）
+`
+						}
+					}
+				]
+			};
+		}
+	);
+
 	return server;
 }
 
