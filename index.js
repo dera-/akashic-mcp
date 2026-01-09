@@ -1084,6 +1084,7 @@ ${genreInfo}
 ## 実装上の注意
 * JavaScript は **CommonJS** と **ES2015+** 構文を使用する。
 * Akashic Engine v3 の API を使用する。
+* エントリポイント(game.json の main で指定しているファイル)では、最初に実行する関数を module.exports に代入する。
 * Akashic API は import を使わず、g. プレフィックスで利用する。
 * g.Scene#loaded と g.Scene#update は v3 では非推奨。g.Scene#onLoad と g.Scene#onUpdate を使う。
 * g.Scene には age がない。必要なら g.game.age を使う。
@@ -1116,6 +1117,7 @@ ${genreInfo}
     * main キーは ./ を含める必要がある（例："./script/_bootstrap.js"）
     * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
     * type: "script" のアセットはグローバルである必要がある（"global": true）
+* エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
 `
 						}
 					}
