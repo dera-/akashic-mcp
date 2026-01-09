@@ -125,8 +125,9 @@ async function createMcpServer() {
 		{
 			filePath: z.string().describe("Relative or absolute path to the file (e.g., 'src/main.ts' or '/tmp/game/main.js')."),
 			code: z.string().describe("The full content of the file."),
+			forbidGameJsonUpdate: z.boolean().optional().describe("When true, prevents writing to game.json."),
 		},
-		async ({ filePath, code }) => {
+		async ({ filePath, code, forbidGameJsonUpdate }) => {
 			// セキュリティ: 親ディレクトリへの遡りを禁止
 			if (!path.isAbsolute(filePath) && filePath.includes('..')) {
 				return { 
@@ -139,6 +140,12 @@ async function createMcpServer() {
 				const fullPath = path.isAbsolute(filePath)
 					? path.normalize(filePath)
 					: path.resolve(process.cwd(), filePath);
+				if (forbidGameJsonUpdate && path.basename(fullPath).toLowerCase() === "game.json") {
+					return {
+						content: [{ type: "text", text: "Error: game.json updates are forbidden by option." }],
+						isError: true,
+					};
+				}
 				const dir = path.dirname(fullPath);
 				
 				if (!fs.existsSync(dir)) {
