@@ -1018,6 +1018,8 @@ ${genreInfo}
 7. **リスクと将来案**：既知の懸念点と、拡張アイデア
 
 ## 前提
+* search_akashic_docs を使用して、Akashic Engine の仕様とニコ生ゲーム側の要件を確認する
+* 画像アセットや音声アセットの新規追加が必要な場合は、import_external_assets で画像・音声素材をダウンロードしてプロジェクト内に配置する
 * ニコ生ゲーム向けの **Akashic Engine v3** を対象とする
 * **テンプレートベースのプロジェクト制約**の範囲内で設計する
 * ニコ生ゲームはPC環境だけでなくスマホ環境も想定しているため、入力方法としてキーボードの利用は禁止
@@ -1103,9 +1105,10 @@ ${genreInfo}
     * "monospace"
   * フォントデータ（フォント画像＋設定テキスト）が提供されている場合は g.BitmapFont を作成して使用する。
 * g.Scene を作るときは game に g.game を設定する。
-  * シーン内でアセットを使う場合は assetPaths を指定する。参考：
+  * シーン内でアセットを使う場合は assetPaths を指定する。この時存在しないパスを指定しないこと。以下参考：
     * [https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html)
     * [https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html)
+  * assetIds の利用は避けること。
 * シーン切り替えについては以下を参照：
   * [https://akashic-games.github.io/reverse-reference/v3/logic/scene.html](https://akashic-games.github.io/reverse-reference/v3/logic/scene.html)
 * javascript-shin-ichiba-ranking（または script/_bootstrap.js が存在する場合）について：
