@@ -3,8 +3,6 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { z } from "zod";
-import axios from "axios";
-import { load as loadCheerio } from "cheerio";
 import AdmZip from "adm-zip";
 import fs from 'fs';
 import path from 'path';
@@ -391,16 +389,17 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 6: External asset import (import_external_assets)
+	// Tool 6: Local asset import (import_external_assets)
 	// ---------------------------------------------------------------
 	server.tool(
 		"import_external_assets",
-		"Download free assets from approved sites and import into the project.",
+		"Import local image/audio assets into the project.",
 		{
 			directoryName: z.string().describe("Project directory path (relative or absolute)."),
 			assets: z.array(z.object({
-				url: z.string().describe("Direct asset file URL."),
+				localPath: z.string().describe("Local file path to import."),
 				type: z.enum(["image", "audio"]).describe("Asset type."),
+				targetDir: z.string().optional().describe("Optional destination directory (relative or absolute)."),
 				fileName: z.string().optional().describe("Optional file name override."),
 				credit: z.object({
 					title: z.string().describe("Asset title."),
@@ -408,18 +407,9 @@ async function createMcpServer() {
 					sourceUrl: z.string().describe("Source page URL."),
 					license: z.string().describe("License name.")
 				}).optional().describe("Credit information to append to README.")
-			})).optional().describe("Assets to download and import."),
-			sourcePageUrl: z.string().optional().describe("Asset page URL to extract links from."),
-			keyword: z.string().optional().describe("Keyword to filter assets found on the page."),
-			maxResults: z.number().int().min(1).optional().describe("Maximum number of assets to download from the page."),
-			creditDefaults: z.object({
-				author: z.string().describe("Default author name."),
-				license: z.string().describe("Default license name."),
-				sourceUrl: z.string().optional().describe("Default source URL."),
-				titlePrefix: z.string().optional().describe("Prefix for generated titles.")
-			}).optional().describe("Default credit values for extracted assets.")
+			})).min(1).describe("Assets to import.")
 		},
-		async ({ directoryName, assets, sourcePageUrl, keyword, maxResults, creditDefaults }) => {
+		async ({ directoryName, assets }) => {
 			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
 				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
 			}
@@ -432,79 +422,74 @@ async function createMcpServer() {
 				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
 			}
 
-			const allowedHosts = new Set([
-				"commons.nicovideo.jp",
-				"www.irasutoya.com",
-				"irasutoya.com",
-				"kenney.nl",
-				"www.kenney.nl",
-				"opengameart.org",
-				"www.opengameart.org",
-				"pipoya.net",
-				"www.pipoya.net",
-				"soundeffect-lab.info",
-				"www.soundeffect-lab.info",
-				"maou.audio",
-				"www.maou.audio",
-				"game-icons.net",
-				"www.game-icons.net",
-				"blogger.googleusercontent.com"
-			]);
-			const isAllowedHost = (host) => {
-				if (!host) return false;
-				if (allowedHosts.has(host)) return true;
-				for (const base of allowedHosts) {
-					if (host.endsWith(`.${base}`)) return true;
-				}
-				return false;
-			};
-
-			const extractAssetsFromPage = async (pageUrl) => {
-				let parsedPageUrl = null;
-				try {
-					parsedPageUrl = new URL(pageUrl);
-				} catch {
-					throw new Error(`Invalid sourcePageUrl: ${pageUrl}`);
-				}
-
-				if (!isAllowedHost(parsedPageUrl.hostname)) {
-					throw new Error(`URL host not allowed: ${parsedPageUrl.hostname}`);
-				}
-
-				const response = await axios.get(pageUrl, { headers: { "User-Agent": "AkashicMCP-Bot/1.0" } });
-				const $ = loadCheerio(response.data);
+			const resolveLocalPath = (rawPath) => {
+				if (!rawPath || !rawPath.trim()) return null;
+				const trimmed = rawPath.trim();
 				const candidates = [];
-				const addCandidate = (url, type, context) => {
-					if (!url) return;
-					let absolute = null;
+				const distroName = process.env.WSL_DISTRO_NAME || "Ubuntu";
+
+				if (/^file:\/\//i.test(trimmed)) {
 					try {
-						absolute = new URL(url, pageUrl).href.split("#")[0];
+						const fileUrl = new URL(trimmed);
+						const urlPath = decodeURIComponent(fileUrl.pathname || "");
+						if (urlPath) {
+							candidates.push(path.normalize(urlPath));
+						}
 					} catch {
-						return;
+						// ignore invalid file URL
 					}
-					candidates.push({ url: absolute, type, context: context || "" });
-				};
+				}
 
-				$("img").each((_, el) => {
-					const src = $(el).attr("src") || $(el).attr("data-src") || $(el).attr("data-original");
-					const context = [$(el).attr("alt"), $(el).attr("title"), $(el).closest("a").text()].filter(Boolean).join(" ");
-					addCandidate(src, "image", context);
-				});
+				if (path.isAbsolute(trimmed)) {
+					candidates.push(path.normalize(trimmed));
+				} else {
+					candidates.push(path.resolve(process.cwd(), trimmed));
+				}
 
-				$("a").each((_, el) => {
-					const href = $(el).attr("href");
-					const context = $(el).text() || "";
-					addCandidate(href, "image", context);
-					addCandidate(href, "audio", context);
-				});
+				if (process.platform === "win32") {
+					if (trimmed.startsWith("/home/")) {
+						const wslPath = `\\\\wsl.localhost\\${distroName}${trimmed.replace(/\//g, "\\")}`;
+						candidates.push(wslPath);
+					}
+					if (trimmed.startsWith("/mnt/")) {
+						const parts = trimmed.split("/");
+						if (parts.length > 2 && /^[a-zA-Z]$/.test(parts[2])) {
+							const drive = parts[2].toUpperCase();
+							const rest = parts.slice(3).join("\\");
+							const winPath = `${drive}:\\${rest}`;
+							candidates.push(winPath);
+						}
+					}
+				}
 
-				$("source").each((_, el) => {
-					const src = $(el).attr("src");
-					const context = $(el).closest("audio").text() || "";
-					addCandidate(src, "audio", context);
-				});
+				const winDriveMatch = /^[a-zA-Z]:[\\/]/.test(trimmed);
+				if (winDriveMatch) {
+					const winPath = trimmed.replace(/\//g, "\\");
+					candidates.push(path.win32.normalize(winPath));
+					if (process.platform !== "win32") {
+						const drive = trimmed[0].toLowerCase();
+						const rest = trimmed.slice(2).replace(/\\/g, "/");
+						const mapped = `/mnt/${drive}${rest.startsWith("/") ? "" : "/"}${rest}`;
+						candidates.push(mapped);
+					}
+				}
 
-				return candidates;
+				const wslMatch = /^\\\\wsl\.localhost\\[^\\]+\\(.+)$/.exec(trimmed);
+				if (wslMatch) {
+					const rel = wslMatch[1].replace(/\\/g, "/");
+					candidates.push(`/${rel}`);
+				}
+
+				for (const candidate of candidates) {
+					try {
+						if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+							return candidate;
+						}
+					} catch {
+						// ignore invalid candidate
+					}
+				}
+				return null;
 			};
 
 			const imageDir = path.resolve(targetPath, "image");
@@ -513,61 +498,21 @@ async function createMcpServer() {
 			fs.mkdirSync(audioDir, { recursive: true });
 
 			const creditLines = [];
-			const downloadedFiles = [];
-			let assetRequests = Array.isArray(assets) ? [...assets] : [];
-
-			if (sourcePageUrl) {
-				let candidates = [];
-				try {
-					candidates = await extractAssetsFromPage(sourcePageUrl);
-				} catch (error) {
-					const message = error && error.message ? error.message : "Unknown error";
-					return { content: [{ type: "text", text: `Error extracting assets: ${message}` }], isError: true };
+			const importedFiles = [];
+			for (let index = 0; index < assets.length; index++) {
+				const asset = assets[index];
+				const rawLocalPath = asset.localPath;
+				const resolvedLocalPath = resolveLocalPath(rawLocalPath);
+				if (!resolvedLocalPath) {
+					return {
+						content: [{ type: "text", text: `Error: Local file not found or inaccessible: ${rawLocalPath}` }],
+						isError: true
+					};
 				}
 
-				const keywordLower = keyword ? keyword.toLowerCase() : null;
-				if (keywordLower) {
-					candidates = candidates.filter((c) => {
-						const text = `${c.url} ${c.context}`.toLowerCase();
-						return text.includes(keywordLower);
-					});
-				}
-
-				if (typeof maxResults === "number") {
-					candidates = candidates.slice(0, maxResults);
-				}
-
-				for (const candidate of candidates) {
-					const ext = path.extname(new URL(candidate.url).pathname).toLowerCase();
-					if (candidate.type === "image" && ![".png", ".jpg", ".jpeg"].includes(ext)) continue;
-					if (candidate.type === "audio" && ![".m4a", ".ogg", ".aac", ".wav", ".mp3", ".mp4"].includes(ext)) continue;
-					assetRequests.push({
-						url: candidate.url,
-						type: candidate.type
-					});
-				}
-			}
-
-			if (assetRequests.length === 0) {
-				return { content: [{ type: "text", text: "Error: No assets specified or found on the page." }], isError: true };
-			}
-
-			for (const asset of assetRequests) {
-				let parsedUrl = null;
-				try {
-					parsedUrl = new URL(asset.url);
-				} catch {
-					return { content: [{ type: "text", text: `Error: Invalid URL: ${asset.url}` }], isError: true };
-				}
-
-				if (!isAllowedHost(parsedUrl.hostname)) {
-					return { content: [{ type: "text", text: `Error: URL host not allowed: ${parsedUrl.hostname}` }], isError: true };
-				}
-
-				const defaultName = path.basename(parsedUrl.pathname);
-				const fileName = asset.fileName && asset.fileName.trim() ? asset.fileName.trim() : defaultName;
+				let fileName = asset.fileName && asset.fileName.trim() ? asset.fileName.trim() : path.basename(resolvedLocalPath);
 				if (!fileName) {
-					return { content: [{ type: "text", text: `Error: Unable to determine file name for ${asset.url}` }], isError: true };
+					return { content: [{ type: "text", text: `Error: Unable to determine file name for ${rawLocalPath}` }], isError: true };
 				}
 
 				const ext = path.extname(fileName).toLowerCase();
@@ -578,50 +523,45 @@ async function createMcpServer() {
 					return { content: [{ type: "text", text: "Error: Unsupported audio format." }], isError: true };
 				}
 
-				const outDir = asset.type === "image" ? imageDir : audioDir;
-				const outPath = path.resolve(outDir, fileName);
-
-				try {
-					const response = await axios.get(asset.url, { responseType: "arraybuffer" });
-					fs.writeFileSync(outPath, Buffer.from(response.data));
-					downloadedFiles.push(outPath);
-				} catch (error) {
-					const message = error && error.message ? error.message : "Unknown error";
-					return { content: [{ type: "text", text: `Error downloading ${asset.url}: ${message}` }], isError: true };
-				}
-
-				if (asset.type === "audio" && ![".m4a", ".ogg"].includes(ext)) {
+				if (asset.type === "image") {
+					const baseDir = asset.targetDir && asset.targetDir.trim()
+						? path.resolve(targetPath, asset.targetDir.trim())
+						: imageDir;
+					if (!baseDir.startsWith(targetPath)) {
+						return { content: [{ type: "text", text: "Error: targetDir must be inside the project directory." }], isError: true };
+					}
+					fs.mkdirSync(baseDir, { recursive: true });
+					const outPath = path.resolve(baseDir, fileName);
 					try {
-						const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
-						const completeAudioCmd = fs.existsSync(localBin) ? `"${localBin}"` : "complete-audio";
-						const command = `cd "${audioDir}" && ${completeAudioCmd} "${outPath}" -f`;
-						await execAsync(command);
+						fs.copyFileSync(resolvedLocalPath, outPath);
+						importedFiles.push(outPath);
 					} catch (error) {
 						const message = error && error.message ? error.message : "Unknown error";
-						return { content: [{ type: "text", text: `Error converting audio with complete-audio: ${message}` }], isError: true };
+						return { content: [{ type: "text", text: `Error copying ${rawLocalPath}: ${message}` }], isError: true };
+					}
+				} else {
+					const baseDir = asset.targetDir && asset.targetDir.trim()
+						? path.resolve(targetPath, asset.targetDir.trim())
+						: audioDir;
+					if (!baseDir.startsWith(targetPath)) {
+						return { content: [{ type: "text", text: "Error: targetDir must be inside the project directory." }], isError: true };
+					}
+					fs.mkdirSync(baseDir, { recursive: true });
+					try {
+						const outPath = path.resolve(baseDir, fileName);
+						fs.copyFileSync(resolvedLocalPath, outPath);
+						importedFiles.push(outPath);
+					} catch (error) {
+						const message = error && error.message ? error.message : "Unknown error";
+						return { content: [{ type: "text", text: `Error copying ${rawLocalPath}: ${message}` }], isError: true };
 					}
 				}
 
-				let credit = asset.credit;
+				const credit = asset.credit;
 				if (!credit) {
-					if (creditDefaults) {
-						const baseTitle = creditDefaults.titlePrefix
-							? `${creditDefaults.titlePrefix}${fileName}`
-							: fileName;
-						credit = {
-							title: baseTitle,
-							author: creditDefaults.author,
-							sourceUrl: creditDefaults.sourceUrl || sourcePageUrl || asset.url,
-							license: creditDefaults.license
-						};
-					} else {
-						return { content: [{ type: "text", text: `Error: Credit is required for ${asset.url}` }], isError: true };
-					}
+					return { content: [{ type: "text", text: `Error: Credit is required for ${rawLocalPath}` }], isError: true };
 				}
-
-				if (credit) {
-					creditLines.push(`- ${credit.title} / ${credit.author} / ${credit.sourceUrl} / ${credit.license}`);
-				}
+				creditLines.push(`- ${credit.title} / ${credit.author} / ${credit.sourceUrl} / ${credit.license}`);
 			}
 
 			if (creditLines.length > 0) {
@@ -639,22 +579,99 @@ async function createMcpServer() {
 				}
 			}
 
-			try {
-				const command = `cd "${targetPath}" && akashic scan asset`;
-				await execAsync(command);
-			} catch (error) {
-				const message = error && error.message ? error.message : "Unknown error";
-				return { content: [{ type: "text", text: `Error during akashic scan asset: ${message}` }], isError: true };
+	return {
+		content: [{ type: "text", text: `Imported ${importedFiles.length} assets.` }]
+	};
+}
+);
+
+	// ---------------------------------------------------------------
+	// Tool 7: complete-audio (run_complete_audio)
+	// ---------------------------------------------------------------
+	server.tool(
+		"run_complete_audio",
+		"Run @akashic/complete-audio in a directory and clean up non-audio outputs.",
+		{
+			directoryName: z.string().describe("Target directory path (relative or absolute)."),
+		},
+		async ({ directoryName }) => {
+			console.error("[info] run_complete_audio", directoryName);
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
 			}
 
-			return {
-				content: [{ type: "text", text: `Imported ${downloadedFiles.length} assets and updated game.json.` }]
-			};
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			try {
+				const logLines = [];
+				logLines.push(`Target: ${targetPath}`);
+				const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
+				const command = fs.existsSync(localBin)
+					? `cd "${targetPath}" && "${localBin}" *`
+					: `cd "${targetPath}" && npx @akashic/complete-audio -f *`;
+				logLines.push(`Command: ${command}`);
+
+				console.error("[info] run_complete_audio command: ", command);
+
+				const beforeFiles = fs.readdirSync(targetPath).filter((file) => {
+					try {
+						return fs.statSync(path.resolve(targetPath, file)).isFile();
+					} catch {
+						return false;
+					}
+				});
+				logLines.push(`Files before: ${beforeFiles.join(", ") || "(none)"}`);
+
+				console.error(`[info] Files before: ${beforeFiles.join(", ") || "(none)"}`);
+
+				const { stdout, stderr } = await execAsync(command);
+				if (stdout && stdout.trim()) logLines.push(`stdout:\n${stdout}`);
+				if (stderr && stderr.trim()) logLines.push(`stderr:\n${stderr}`);
+
+				console.error(`[info] stdout:\n${stdout}`);
+				console.error(`[info] stderr:\n${stderr}`);
+
+				const keepExt = new Set([".ogg", ".m4a", ".aac"]);
+				const files = fs.readdirSync(targetPath);
+				let removedCount = 0;
+				let keptCount = 0;
+				for (const file of files) {
+					const fullPath = path.resolve(targetPath, file);
+					if (!fs.statSync(fullPath).isFile()) continue;
+					const ext = path.extname(file).toLowerCase();
+					if (!keepExt.has(ext)) {
+						fs.unlinkSync(fullPath);
+						removedCount += 1;
+					} else {
+						keptCount += 1;
+					}
+				}
+
+				logLines.push(`Cleanup: kept=${keptCount}, removed=${removedCount}`);
+
+				return {
+					content: [{ type: "text", text: logLines.join("\n") }]
+				};
+			} catch (error) {
+				const message = error && error.message ? error.message : "Unknown error";
+				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
+				return {
+					content: [{ type: "text", text: `Error running complete-audio: ${message}${stdout}${stderr}` }],
+					isError: true,
+				};
+			}
 		}
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 7: Headless test (headless_akashic_test)
+	// Tool 8: Headless test (headless_akashic_test)
 	// ---------------------------------------------------------------
 	server.tool(
 		"headless_akashic_test",
@@ -789,7 +806,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-		// Tool 8: ESLint format (format_with_eslint)
+		// Tool 9: ESLint format (format_with_eslint)
 	// ---------------------------------------------------------------
 	server.tool(
 		"format_with_eslint",
@@ -855,7 +872,69 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 9: Write README (write_project_readme)
+	// Tool 10: JS syntax check (check_js_syntax)
+	// ---------------------------------------------------------------
+	server.tool(
+		"check_js_syntax",
+		"Check JavaScript syntax using node --check.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			filePaths: z.array(z.string()).optional().describe("Files to check (relative to directoryName). Defaults to script/main.js if present."),
+		},
+		async ({ directoryName, filePaths }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			let targets = Array.isArray(filePaths) ? filePaths.filter((p) => p && p.trim()) : [];
+			if (targets.length === 0) {
+				const defaultPath = path.resolve(targetPath, "script", "main.js");
+				if (fs.existsSync(defaultPath)) {
+					targets = ["script/main.js"];
+				} else {
+					return { content: [{ type: "text", text: "Error: No filePaths provided and script/main.js not found." }], isError: true };
+				}
+			}
+
+			const results = [];
+			for (const relPath of targets) {
+				const fullPath = path.resolve(targetPath, relPath);
+				if (!fullPath.startsWith(targetPath)) {
+					return { content: [{ type: "text", text: `Error: filePath must be inside the project directory: ${relPath}` }], isError: true };
+				}
+				if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+					return { content: [{ type: "text", text: `Error: File not found: ${relPath}` }], isError: true };
+				}
+
+				try {
+					const command = `node --check "${fullPath}"`;
+					const { stdout, stderr } = await execAsync(command);
+					const output = [stdout, stderr].filter(Boolean).join("\n");
+					results.push(`${relPath}: OK${output ? `\n${output}` : ""}`);
+				} catch (error) {
+					const message = error && error.message ? error.message : "Unknown error";
+					const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
+					const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
+					results.push(`${relPath}: ERROR\n${message}${stdout}${stderr}`);
+				}
+			}
+
+			return {
+				content: [{ type: "text", text: results.join("\n\n") }]
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 10: Write README (write_project_readme)
 	// ---------------------------------------------------------------
 	server.tool(
 		"write_project_readme",
@@ -934,7 +1013,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 10: Project zip (zip_project_base64)
+	// Tool 11: Project zip (zip_project_base64)
 	// ---------------------------------------------------------------
 	server.tool(
 		"zip_project_base64",
@@ -1019,7 +1098,6 @@ ${genreInfo}
 
 ## 前提
 * search_akashic_docs を使用して、Akashic Engine の仕様とニコ生ゲーム側の要件を確認する
-* 画像アセットや音声アセットの新規追加が必要な場合は、import_external_assets で画像・音声素材をダウンロードしてプロジェクト内に配置する
 * ニコ生ゲーム向けの **Akashic Engine v3** を対象とする
 * **テンプレートベースのプロジェクト制約**の範囲内で設計する
 * ニコ生ゲームはPC環境だけでなくスマホ環境も想定しているため、入力方法としてキーボードの利用は禁止
@@ -1065,32 +1143,39 @@ ${genreInfo}
 4. **仕様／ルール／演出の定義**：ゲームの仕様・ルール・見せ方（演出）を要約する。未指定なら提案する。
    * **二段階生成**：Phase 1 では最小限の動くゲーム（MVP）のみ実装し、演出や追加機能は Phase 2 で明示的に依頼された場合のみ追加する。
    * 既存プロジェクトで生成履歴がない場合は、ソースコードや README から仕様を推測する。
-   * 素材の入手元が指定されている場合は、import_external_assets を使ってダウンロードし配置する。
-   * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
-5. **実装**：コードを書く際は create_game_file を使用する。
-   * ディレクトリ構成：
+   * 新規プロジェクトの場合、ディレクトリ構成は以下の通りとなる：
      * script：ゲームロジック（JavaScript / CommonJS）
      * image：画像
      * audio：音声
      * text：テキスト
      * game.json
+   * 素材の入手元が指定されている場合は、import_external_assets を使ってプロジェクト内に配置する。
+     * 新規プロジェクトの場合、画像は image ディレクトリ、音声は audio ディレクトリに配置する。
+     * 既存プロジェクトの場合、game.json やディレクトリ構造を見て配置場所を推測すること
+       * 画像や音声の配置場所がないときは、image ディレクトリや audioディレクトリを新規作成してそこに配置する
+   * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
+5. **実装**：コードを書く際は create_game_file を使用する。
    * ロジックは main.ts または main.js に実装する。
      * main.ts / main.js が 500 行を超える場合は、クラスや関数を別ファイルに分割する。
        * クラス例：シーン、エンティティ
        * 関数例：ユーティリティ関数、API
-   * ランキングゲームの場合は、「Ranking Game | Akashic Engine」（[https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。)
+   * データやテキストは、text ディレクトリ以下に json ファイルもしくは txt ファイルとして配置する(テキストアセットとして扱う)
+     * 読み込むときは、画像アセットや音声アセットと同様に g.Scene の assetPaths もしくは assetIds を利用する。詳細は以下を参照すること
+       * [アセットを読み込む | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html)
+     * 対象のデータやテキスト利用時は、getText() もしくは getTextById() を利用する。詳細は以下を参照すること
+     * [読み込んだアセットを取得する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html )
+   * ランキングゲームの場合は、[ランキングゲーム | Akashic Engine](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。
+   * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
    * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
    * 明示的に必要と言われない限り game.json を変更しない。
-6. **game.json の更新**：新規・変更されたアセット、または新しいスクリプトを追加した場合のみ akashic_scan_asset を使う。
-7. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
-
-## コード品質
-* 読みやすいコードを書くこと。
-* 必要なコメントを付けること。
-* エラーを適切に扱うこと（例：アセット読み込み待ちなど）。
+6. **音声ファイルをニコ生ゲーム対応形式に変換**：音声ファイルの新規追加・変更時のみ、 run_complete_audio を必ず使う
+   * このとき directoryName にプロジェクトの audio ディレクトリ(無い場合は音声ファイルが格納されているディレクトリ)のパスを指定すること
+7. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
+8. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
 
 ## 実装上の注意
+* 必要なコメントを付けること。
 * JavaScript は **CommonJS** と **ES2015+** 構文を使用する。
 * Akashic Engine v3 の API を使用する。
 * エントリポイント(game.json の main で指定しているファイル)では、最初に実行する関数を module.exports に代入する。
@@ -1106,11 +1191,14 @@ ${genreInfo}
   * フォントデータ（フォント画像＋設定テキスト）が提供されている場合は g.BitmapFont を作成して使用する。
 * g.Scene を作るときは game に g.game を設定する。
   * シーン内でアセットを使う場合は assetPaths を指定する。この時存在しないパスを指定しないこと。以下参考：
-    * [https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html)
-    * [https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html)
-  * assetIds の利用は避けること。
+    * assetPaths にはプロジェクトからのパスを "/" から記述する(例： image/hoge.png の場合、/image/hoge.png と記述する)。
+    * 音声ファイルの場合は拡張子は記述しない(例： audio/fuga.m4a と audio/fuga.ogg がある場合、/audio/fuga と記述する)。
+    * assetPaths 自体はワイルドカードの利用可能なので /image/**/* や /audio/**/* といった表記が可能
+    * asset の登録と利用についての詳細は以下を参照すること
+      * [アセットを読み込む | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/read-asset.html)
+      * [読み込んだアセットを取得する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html)
 * シーン切り替えについては以下を参照：
-  * [https://akashic-games.github.io/reverse-reference/v3/logic/scene.html](https://akashic-games.github.io/reverse-reference/v3/logic/scene.html)
+  * [シーンを切り替える | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/logic/scene.html)
 * javascript-shin-ichiba-ranking（または script/_bootstrap.js が存在する場合）について：
   * game.json の main は変更しない。
   * script/_bootstrap.js を変更・削除しない。
@@ -1123,13 +1211,13 @@ ${genreInfo}
     * ランキングの制限時間を変更する（environment.nicolive.preferredSessionParameters.totalTimeLimit）
       * totalTimeLimit は秒単位（例：90 は 90 秒）
   * 変更が必要な場合は以下を参照：
-    * [https://akashic-games.github.io/reference/manifest/game-json.html](https://akashic-games.github.io/reference/manifest/game-json.html)
+    * [game.json の仕様 | Akashic Engine](https://akashic-games.github.io/reference/manifest/game-json.html)
     * main キーは ./ を含める必要がある（例："./script/_bootstrap.js"）
     * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
     * type: "script" のアセットはグローバルである必要がある（"global": true）
 * エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
 * g.Labelは改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
-* g.game には onLoad などのトリガーは存在しないので、 g.game のトリガーにハンドラを登録する処理は禁止。
+* g.game に onLoad は存在しないので、 g.game.onLoad にハンドラを登録する処理は禁止。
 `
 						}
 					}
