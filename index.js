@@ -1289,8 +1289,11 @@ ${genreInfo}
     * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
     * type: "script" のアセットはグローバルである必要がある（"global": true）
 * エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
-* g.Labelは改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
+* g.Label は改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
 * g.game に onLoad は存在しないので、 g.game.onLoad にハンドラを登録する処理は禁止。
+* g.Sprite の拡縮を行う場合は、g.Sprite のプロパティの scaleX, scaleY, srcWidth, srcHeight を利用すること(この時 width, height は省略すること)。詳細は以下を参照：
+  * [拡縮とアンカーポイント | Akashic Engine](https://akashic-games.github.io/tutorial/v3/scale-anchor.html)
+  * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
 `
 						}
 					}
