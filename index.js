@@ -934,6 +934,79 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
+	// Tool 11: Read project files (read_project_files)
+	// ---------------------------------------------------------------
+	server.tool(
+		"read_project_files",
+		"Read text files from a project directory (skips images/audio/binary).",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			maxBytes: z.number().int().min(1).optional().describe("Maximum bytes per file (default: 200000).")
+		},
+		async ({ directoryName, maxBytes }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const options = {
+				maxBytes: typeof maxBytes === "number" ? maxBytes : 200000
+			};
+			const skipExt = new Set([
+				".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+				".mp3", ".wav", ".m4a", ".ogg", ".aac", ".mp4", ".webm",
+				".zip", ".7z", ".tar", ".gz", ".bz2", ".xz",
+				".exe", ".dll", ".so", ".dylib", ".bin", ".dat",
+				".ico", ".pdf"
+			]);
+
+			const files = [];
+			const readFileSafe = (fullPath, relPath) => {
+				if (!fullPath.startsWith(targetPath)) return;
+				if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) return;
+				const ext = path.extname(relPath).toLowerCase();
+				if (skipExt.has(ext)) return;
+				const data = fs.readFileSync(fullPath);
+				if (data.length > options.maxBytes) {
+					files.push({
+						path: relPath,
+						content: "",
+						truncated: true
+					});
+					return;
+				}
+				files.push({ path: relPath, content: data.toString("utf-8") });
+			};
+
+			const walk = (dir, baseRel) => {
+				if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return;
+				const entries = fs.readdirSync(dir);
+				for (const entry of entries) {
+					const full = path.resolve(dir, entry);
+					const rel = path.join(baseRel, entry);
+					if (fs.statSync(full).isDirectory()) {
+						walk(full, rel);
+					} else if (fs.statSync(full).isFile()) {
+						readFileSafe(full, rel.replace(/\\/g, "/"));
+					}
+				}
+			};
+			walk(targetPath, ".");
+
+			return {
+				content: [{ type: "text", text: JSON.stringify({ files }, null, 2) }]
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
 	// Tool 10: Write README (write_project_readme)
 	// ---------------------------------------------------------------
 	server.tool(
@@ -1133,7 +1206,7 @@ ${genreInfo}
 ## 開発ガイドライン
 1. **まず調査**：実装に必要な最新の API 仕様（例：音声再生、当たり判定、乱数など）と、ニコ生ゲーム側の要件を確認するために、search_akashic_docs を使用すること。
 2. **出力ディレクトリ固定**：生成物は必ずこの固定パスに出力すること：${targetDir}
-3. **プロジェクト作成**：プロジェクトが存在しない場合は init_project を実行する。
+3. **プロジェクト作成・確認**：プロジェクトが存在しない場合は init_project を使ってテンプレートを生成する。プロジェクトが存在する場合は read_project_files を使ってゲーム内容を確認する。
    * 明示指定がない限り、ゲーム形式に応じて templateType を選ぶ：
      * ランキング：javascript-shin-ichiba-ranking
      * マルチプレイ：javascript-multi
@@ -1142,7 +1215,7 @@ ${genreInfo}
    * init_project が失敗した場合は、代わりに init_minimal_template を実行する。
 4. **仕様／ルール／演出の定義**：ゲームの仕様・ルール・見せ方（演出）を要約する。未指定なら提案する。
    * **二段階生成**：Phase 1 では最小限の動くゲーム（MVP）のみ実装し、演出や追加機能は Phase 2 で明示的に依頼された場合のみ追加する。
-   * 既存プロジェクトで生成履歴がない場合は、ソースコードや README から仕様を推測する。
+   * 既存プロジェクトで生成履歴がない場合は、read_project_files を使ってソースコードや README から仕様を推測する。
    * 新規プロジェクトの場合、ディレクトリ構成は以下の通りとなる：
      * script：ゲームロジック（JavaScript / CommonJS）
      * image：画像
