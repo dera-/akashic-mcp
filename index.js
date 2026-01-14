@@ -1007,7 +1007,7 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 10: Write README (write_project_readme)
+	// Tool 12: Write README (write_project_readme)
 	// ---------------------------------------------------------------
 	server.tool(
 		"write_project_readme",
@@ -1281,6 +1281,7 @@ ${genreInfo}
   * 手動編集を許可するのは以下の場合のみ：
     * アセットをグローバル化する（"global": true を追加）
     * type: "audio" のアセットの systemId を変更する
+	  * 音声をループする(BGMにする)時のみ、systemId を "music" に変更する
     * ランキングの制限時間を変更する（environment.nicolive.preferredSessionParameters.totalTimeLimit）
       * totalTimeLimit は秒単位（例：90 は 90 秒）
   * 変更が必要な場合は以下を参照：
@@ -1293,6 +1294,10 @@ ${genreInfo}
 * g.game に onLoad は存在しないので、 g.game.onLoad にハンドラを登録する処理は禁止。
 * g.Sprite の拡縮を行う場合は、g.Sprite のプロパティの scaleX, scaleY, srcWidth, srcHeight を利用すること(この時 width, height は省略すること)。詳細は以下を参照：
   * [拡縮とアンカーポイント | Akashic Engine](https://akashic-games.github.io/tutorial/v3/scale-anchor.html)
+  * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
+* 1枚の画像でアニメーションを粉う場合は g.FrameSprite を利用すること。詳細は以下を参照：
+  * [フレームアニメーション (パラパラアニメ) する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/frame-animation.html)
+* 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
   * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
 `
 						}
