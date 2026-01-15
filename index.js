@@ -1231,7 +1231,7 @@ ${genreInfo}
      * 新規プロジェクトの場合、画像は image ディレクトリ、音声は audio ディレクトリに配置する。
      * 既存プロジェクトの場合、game.json やディレクトリ構造を見て配置場所を推測すること
        * 画像や音声の配置場所がないときは、image ディレクトリや audioディレクトリを新規作成してそこに配置する
-     * 音声追加時は、directoryName に音声の配置ディレクトリのパスを指定して run_complete_audio を実行する。
+     * 音声追加時は、ファイル形式をニコ生ゲーム対応の形式に変換するため、directoryName に音声の配置ディレクトリのパスを指定して run_complete_audio を実行する。
    * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
 5. **実装**：コードを書く際は create_game_file を使用する。
    * ロジックは main.ts または main.js に実装する。
