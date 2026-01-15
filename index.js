@@ -611,14 +611,6 @@ async function createMcpServer() {
 			try {
 				const logLines = [];
 				logLines.push(`Target: ${targetPath}`);
-				const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
-				const command = fs.existsSync(localBin)
-					? `cd "${targetPath}" && "${localBin}" *`
-					: `cd "${targetPath}" && npx @akashic/complete-audio -f *`;
-				logLines.push(`Command: ${command}`);
-
-				console.error("[info] run_complete_audio command: ", command);
-
 				const beforeFiles = fs.readdirSync(targetPath).filter((file) => {
 					try {
 						return fs.statSync(path.resolve(targetPath, file)).isFile();
@@ -627,15 +619,28 @@ async function createMcpServer() {
 					}
 				});
 				logLines.push(`Files before: ${beforeFiles.join(", ") || "(none)"}`);
+				const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
+				const candidates = beforeFiles.filter((file) => {
+					const ext = path.extname(file).toLowerCase();
+					return ![".ogg", ".m4a", ".aac"].includes(ext);
+				});
+				logLines.push(`Conversion targets: ${candidates.join(", ") || "(none)"}`);
+				console.error(`[info] Conversion targets: ${candidates.join(", ") || "(none)"}`);
 
-				console.error(`[info] Files before: ${beforeFiles.join(", ") || "(none)"}`);
+				for (const file of candidates) {
+					const filePath = path.resolve(targetPath, file);
+					const command = fs.existsSync(localBin)
+						? `cd "${targetPath}" && "${localBin}" -f "${filePath}"`
+						: `cd "${targetPath}" && npx @akashic/complete-audio -f "${filePath}"`;
+					logLines.push(`Command: ${command}`);
+					console.error("[info] run_complete_audio command: ", command);
 
-				const { stdout, stderr } = await execAsync(command);
-				if (stdout && stdout.trim()) logLines.push(`stdout:\n${stdout}`);
-				if (stderr && stderr.trim()) logLines.push(`stderr:\n${stderr}`);
-
-				console.error(`[info] stdout:\n${stdout}`);
-				console.error(`[info] stderr:\n${stderr}`);
+					const { stdout, stderr } = await execAsync(command);
+					if (stdout && stdout.trim()) logLines.push(`stdout:\n${stdout}`);
+					if (stderr && stderr.trim()) logLines.push(`stderr:\n${stderr}`);
+					console.error(`[info] stdout:\n${stdout}`);
+					console.error(`[info] stderr:\n${stderr}`);
+				}
 
 				const keepExt = new Set([".ogg", ".m4a", ".aac"]);
 				const files = fs.readdirSync(targetPath);
@@ -1226,6 +1231,7 @@ ${genreInfo}
      * 新規プロジェクトの場合、画像は image ディレクトリ、音声は audio ディレクトリに配置する。
      * 既存プロジェクトの場合、game.json やディレクトリ構造を見て配置場所を推測すること
        * 画像や音声の配置場所がないときは、image ディレクトリや audioディレクトリを新規作成してそこに配置する
+     * 音声追加時は、directoryName に音声の配置ディレクトリのパスを指定して run_complete_audio を実行する。
    * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
 5. **実装**：コードを書く際は create_game_file を使用する。
    * ロジックは main.ts または main.js に実装する。
@@ -1242,10 +1248,8 @@ ${genreInfo}
    * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
    * 明示的に必要と言われない限り game.json を変更しない。
-6. **音声ファイルをニコ生ゲーム対応形式に変換**：音声ファイルの新規追加・変更時のみ、 run_complete_audio を必ず使う
-   * このとき directoryName にプロジェクトの audio ディレクトリ(無い場合は音声ファイルが格納されているディレクトリ)のパスを指定すること
-7. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
-8. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
+6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
+7. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
 
 ## 実装上の注意
 * 必要なコメントを付けること。
@@ -1292,9 +1296,8 @@ ${genreInfo}
 * エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
 * g.Label は改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
 * g.game に onLoad は存在しないので、 g.game.onLoad にハンドラを登録する処理は禁止。
-* g.Sprite の拡縮を行う場合は、g.Sprite のプロパティの scaleX, scaleY, srcWidth, srcHeight を利用すること(この時 width, height は省略すること)。詳細は以下を参照：
-  * [拡縮とアンカーポイント | Akashic Engine](https://akashic-games.github.io/tutorial/v3/scale-anchor.html)
-  * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
+* g.Sprite の拡縮を行う場合は、g.Sprite のプロパティの width, height, srcWidth, srcHeight を利用すること
+  * この時 width, height に拡縮後の値、 srcWidth, srcHeight には元の画像サイズを与えること。
 * 1枚の画像でアニメーションを粉う場合は g.FrameSprite を利用すること。詳細は以下を参照：
   * [フレームアニメーション (パラパラアニメ) する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/frame-animation.html)
 * 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
