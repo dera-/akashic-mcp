@@ -622,6 +622,7 @@ async function createMcpServer() {
 				const localBin = path.resolve(targetPath, "node_modules", ".bin", "complete-audio");
 				const candidates = beforeFiles.filter((file) => {
 					const ext = path.extname(file).toLowerCase();
+					if (!ext) return false;
 					return ![".ogg", ".m4a", ".aac"].includes(ext);
 				});
 				logLines.push(`Conversion targets: ${candidates.join(", ") || "(none)"}`);
