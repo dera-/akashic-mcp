@@ -947,9 +947,10 @@ async function createMcpServer() {
 		"Read text files from a project directory (skips images/audio/binary).",
 		{
 			directoryName: z.string().describe("Project directory path (relative or absolute)."),
-			maxBytes: z.number().int().min(1).optional().describe("Maximum bytes per file (default: 200000).")
+			maxBytes: z.number().int().min(1).optional().describe("Maximum bytes per file (default: 200000)."),
+			maxFiles: z.number().int().min(1).optional().describe("Maximum number of files to read (default: 500).")
 		},
-		async ({ directoryName, maxBytes }) => {
+		async ({ directoryName, maxBytes, maxFiles }) => {
 			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
 				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
 			}
@@ -963,7 +964,8 @@ async function createMcpServer() {
 			}
 
 			const options = {
-				maxBytes: typeof maxBytes === "number" ? maxBytes : 200000
+				maxBytes: typeof maxBytes === "number" ? maxBytes : 200000,
+				maxFiles: typeof maxFiles === "number" ? maxFiles : 500
 			};
 			const skipExt = new Set([
 				".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
@@ -972,6 +974,16 @@ async function createMcpServer() {
 				".exe", ".dll", ".so", ".dylib", ".bin", ".dat",
 				".ico", ".pdf"
 			]);
+			const skipDirs = new Set([
+				".git",
+				"node_modules",
+				".mcp",
+				"tmp",
+				"dist",
+				"build",
+				"data/wget_mirror"
+			]);
+			let readCount = 0;
 
 			const files = [];
 			const readFileSafe = (fullPath, relPath) => {
@@ -995,12 +1007,19 @@ async function createMcpServer() {
 				if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return;
 				const entries = fs.readdirSync(dir);
 				for (const entry of entries) {
+					if (readCount >= options.maxFiles) return;
 					const full = path.resolve(dir, entry);
 					const rel = path.join(baseRel, entry);
 					if (fs.statSync(full).isDirectory()) {
+						const relDir = rel.replace(/\\/g, "/");
+						if (skipDirs.has(entry) || skipDirs.has(relDir)) {
+							continue;
+						}
 						walk(full, rel);
 					} else if (fs.statSync(full).isFile()) {
+						if (readCount >= options.maxFiles) return;
 						readFileSafe(full, rel.replace(/\\/g, "/"));
+						readCount += 1;
 					}
 				}
 			};
