@@ -1314,6 +1314,7 @@ ${genreInfo}
     * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
     * type: "script" のアセットはグローバルである必要がある（"global": true）
 * エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
+* エンティティ(g.E を継承しているオブジェクト)を表示する時は show() メソッドを、非表示にする時は hide() メソッドを使ってください(この時に限っては modified() メソッド呼び出しは不要です)。
 * g.Label は改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
 * g.game に onLoad は存在しないので、 g.game.onLoad にハンドラを登録する処理は禁止。
 * g.Sprite の拡縮を行う場合は、g.Sprite のプロパティの width, height, srcWidth, srcHeight を利用すること
