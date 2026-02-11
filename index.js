@@ -1413,6 +1413,8 @@ async function main() {
 	const proxyBasePath = "/proxy";
 	const toolsPath = `${proxyBasePath}/tools`;
 	const callPath = `${proxyBasePath}/call`;
+	const promptsPath = `${proxyBasePath}/prompts`;
+	const promptPath = `${proxyBasePath}/prompt`;
 	const baseUrl = `http://localhost:${port}`;
 
 	const httpServer = http.createServer(async (req, res) => {
@@ -1473,6 +1475,26 @@ async function main() {
 				return sendJson(res, 200, tools);
 			}
 
+			if (req.method === "GET" && pathname === promptsPath) {
+				const client = await getProxyClient(baseUrl);
+				const prompts = await client.listPrompts();
+				return sendJson(res, 200, prompts);
+			}
+
+			if (req.method === "POST" && pathname === promptPath) {
+				const body = await readJsonBody(req);
+				if (body === undefined) {
+					return sendJson(res, 400, { error: "Invalid JSON body." });
+				}
+				if (!body || typeof body.name !== "string") {
+					return sendJson(res, 400, { error: "Missing prompt name." });
+				}
+				const args = body.arguments && typeof body.arguments === "object" ? body.arguments : {};
+				const client = await getProxyClient(baseUrl);
+				const prompt = await client.getPrompt({ name: body.name, arguments: args });
+				return sendJson(res, 200, prompt);
+			}
+
 			if (req.method === "POST" && pathname === callPath) {
 				const body = await readJsonBody(req);
 				if (body === undefined) {
@@ -1501,6 +1523,8 @@ async function main() {
 		console.error(`SSE endpoint: ${ssePath}`);
 		console.error(`Message endpoint: ${messagePath}`);
 		console.error(`Proxy tools endpoint: ${toolsPath}`);
+		console.error(`Proxy prompts endpoint: ${promptsPath}`);
+		console.error(`Proxy prompt endpoint: ${promptPath}`);
 		console.error(`Proxy call endpoint: ${callPath}`);
 	});
 }
