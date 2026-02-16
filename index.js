@@ -7,7 +7,7 @@ import AdmZip from "adm-zip";
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import util from 'util';
 
 // execをPromise化して非同期処理しやすくする
@@ -940,7 +940,293 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 11: Read project files (read_project_files)
+	// Tool 11: Serve and inspect console (akashic_serve)
+	// ---------------------------------------------------------------
+	server.tool(
+		"akashic_serve",
+		"Serve an Akashic project for a fixed duration, inspect browser devtools console logs, and map errors to source lines.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			durationMs: z.number().int().min(1000).max(120000).optional().describe("How long to run the game in milliseconds (default: 10000)."),
+			port: z.number().int().min(1).max(65535).optional().describe("Serve port (default: 3300)."),
+			entryPath: z.string().optional().describe("Path to open in browser (default: '/')."),
+		},
+		async ({ directoryName, durationMs, port, entryPath }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const gameJsonPath = path.resolve(targetPath, "game.json");
+			if (!fs.existsSync(gameJsonPath)) {
+				return { content: [{ type: "text", text: "Error: game.json not found in project directory." }], isError: true };
+			}
+
+			const runDurationMs = typeof durationMs === "number" ? durationMs : 10000;
+			const servePort = typeof port === "number" ? port : 3300;
+			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
+			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
+
+			const localAkashicBin = path.resolve(targetPath, "node_modules", ".bin", "akashic");
+			const useLocalBin = fs.existsSync(localAkashicBin);
+			const command = useLocalBin ? localAkashicBin : "npx";
+			const args = useLocalBin
+				? ["serve", "--host", "127.0.0.1", "--port", String(servePort)]
+				: ["akashic", "serve", "--host", "127.0.0.1", "--port", String(servePort)];
+
+			let chromium = null;
+			try {
+				const playwright = await import("playwright");
+				chromium = playwright.chromium;
+			} catch {
+				return {
+					content: [{
+						type: "text",
+						text: "Error: 'playwright' is required for akashic_serve. Install it in this MCP server project (npm install playwright)."
+					}],
+					isError: true
+				};
+			}
+
+			const stdoutLogs = [];
+			const stderrLogs = [];
+			const consoleLogs = [];
+			const errorLogs = [];
+			const pageErrors = [];
+
+			const maxLogItems = 200;
+			const pushLimited = (arr, value) => {
+				if (arr.length < maxLogItems) arr.push(value);
+			};
+
+			const serveProcess = spawn(command, args, {
+				cwd: targetPath,
+				env: process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+				shell: false
+			});
+
+			const cleanupServeProcess = async () => {
+				if (serveProcess.killed) return;
+				try {
+					serveProcess.kill("SIGTERM");
+				} catch {
+					// ignore
+				}
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				if (!serveProcess.killed) {
+					try {
+						serveProcess.kill("SIGKILL");
+					} catch {
+						// ignore
+					}
+				}
+			};
+
+			serveProcess.stdout.on("data", (chunk) => {
+				pushLimited(stdoutLogs, String(chunk).trim());
+			});
+			serveProcess.stderr.on("data", (chunk) => {
+				pushLimited(stderrLogs, String(chunk).trim());
+			});
+
+			const findFileByBaseName = (rootDir, fileName) => {
+				const skipDirs = new Set(["node_modules", ".git", ".mcp", "tmp", "dist", "build"]);
+				const walk = (dir) => {
+					const entries = fs.readdirSync(dir, { withFileTypes: true });
+					for (const entry of entries) {
+						if (entry.isDirectory()) {
+							if (skipDirs.has(entry.name)) continue;
+							const nested = walk(path.resolve(dir, entry.name));
+							if (nested) return nested;
+						} else if (entry.isFile() && entry.name === fileName) {
+							return path.resolve(dir, entry.name);
+						}
+					}
+					return null;
+				};
+				try {
+					return walk(rootDir);
+				} catch {
+					return null;
+				}
+			};
+
+			const mapErrorToSource = (text) => {
+				const patterns = [
+					/(https?:\/\/[^)\s]+\.js):(\d+):(\d+)/,
+					/(\/[^)\s]+\.js):(\d+):(\d+)/,
+					/([A-Za-z0-9_.-]+\.js):(\d+):(\d+)/
+				];
+				for (const pattern of patterns) {
+					const match = text.match(pattern);
+					if (!match) continue;
+					const rawPath = match[1];
+					const line = Number(match[2]);
+					const column = Number(match[3]);
+					let resolved = null;
+					if (/^https?:\/\//.test(rawPath)) {
+						try {
+							const u = new URL(rawPath);
+							const fromUrlPath = u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname;
+							const candidate = path.resolve(targetPath, fromUrlPath);
+							if (candidate.startsWith(targetPath) && fs.existsSync(candidate)) {
+								resolved = candidate;
+							}
+						} catch {
+							// ignore
+						}
+					} else if (rawPath.startsWith("/")) {
+						const candidate = path.resolve(targetPath, rawPath.slice(1));
+						if (candidate.startsWith(targetPath) && fs.existsSync(candidate)) {
+							resolved = candidate;
+						}
+					} else {
+						const direct = path.resolve(targetPath, rawPath);
+						if (direct.startsWith(targetPath) && fs.existsSync(direct)) {
+							resolved = direct;
+						} else {
+							resolved = findFileByBaseName(targetPath, path.basename(rawPath));
+						}
+					}
+
+					let sourceLine = null;
+					if (resolved && fs.existsSync(resolved)) {
+						try {
+							const lines = fs.readFileSync(resolved, "utf-8").split(/\r?\n/);
+							sourceLine = line > 0 && line <= lines.length ? lines[line - 1] : null;
+						} catch {
+							// ignore
+						}
+					}
+					return {
+						rawPath,
+						file: resolved ? path.relative(targetPath, resolved).replace(/\\/g, "/") : null,
+						line,
+						column,
+						sourceLine
+					};
+				}
+				return null;
+			};
+
+			let browser = null;
+			try {
+				browser = await chromium.launch({ headless: true });
+				const page = await browser.newPage();
+
+				page.on("console", (msg) => {
+					const text = msg.text();
+					const type = msg.type();
+					const location = msg.location();
+					const item = {
+						type,
+						text,
+						url: location && location.url ? location.url : null,
+						lineNumber: location && typeof location.lineNumber === "number" ? location.lineNumber + 1 : null,
+						columnNumber: location && typeof location.columnNumber === "number" ? location.columnNumber + 1 : null
+					};
+					pushLimited(consoleLogs, item);
+					if (type === "error") {
+						pushLimited(errorLogs, item);
+					}
+				});
+
+				page.on("pageerror", (error) => {
+					const text = error && error.stack ? String(error.stack) : String(error);
+					pushLimited(pageErrors, { type: "pageerror", text });
+					pushLimited(errorLogs, { type: "pageerror", text });
+				});
+
+				let opened = false;
+				for (let i = 0; i < 20; i++) {
+					if (serveProcess.killed) break;
+					try {
+						await page.goto(serveUrl, { waitUntil: "domcontentloaded", timeout: 1500 });
+						opened = true;
+						break;
+					} catch {
+						await new Promise((resolve) => setTimeout(resolve, 500));
+					}
+				}
+
+				if (!opened) {
+					await cleanupServeProcess();
+					return {
+						content: [{
+							type: "text",
+							text: JSON.stringify({
+								status: "failed",
+								reason: `Failed to open ${serveUrl}`,
+								serveStdout: stdoutLogs,
+								serveStderr: stderrLogs
+							}, null, 2)
+						}],
+						isError: true
+					};
+				}
+
+				await new Promise((resolve) => setTimeout(resolve, runDurationMs));
+			} catch (error) {
+				const message = error && error.message ? error.message : "Unknown error";
+				return {
+					content: [{
+						type: "text",
+						text: `Error while serving or browser inspection: ${message}`
+					}],
+					isError: true
+				};
+			} finally {
+				try {
+					if (browser) await browser.close();
+				} catch {
+					// ignore
+				}
+				await cleanupServeProcess();
+			}
+
+			const mappedErrors = errorLogs.map((entry) => {
+				const mapping = mapErrorToSource(entry.text || "");
+				return {
+					type: entry.type,
+					message: entry.text || "",
+					file: mapping ? mapping.file : null,
+					line: mapping ? mapping.line : null,
+					column: mapping ? mapping.column : null,
+					sourceLine: mapping ? mapping.sourceLine : null
+				};
+			});
+			const hasErrors = mappedErrors.length > 0;
+			const result = {
+				status: hasErrors ? "error_detected" : "ok",
+				url: serveUrl,
+				durationMs: runDurationMs,
+				logSummary: {
+					consoleCount: consoleLogs.length,
+					errorCount: mappedErrors.length,
+					pageErrorCount: pageErrors.length
+				},
+				errors: mappedErrors,
+				consoleLogs,
+				serveStdout: stdoutLogs,
+				serveStderr: stderrLogs
+			};
+
+			return {
+				content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				isError: hasErrors
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 12: Read project files (read_project_files)
 	// ---------------------------------------------------------------
 	server.tool(
 		"read_project_files",
@@ -1148,6 +1434,191 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
+	// Tool 15: Validate Niconama spec (validate_niconama_spec)
+	// ---------------------------------------------------------------
+	server.tool(
+		"validate_niconama_spec",
+		"Validate a Niconama (Akashic) project against common manifest/asset compliance checks.",
+		{
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			expectedMode: z.enum(["ranking", "multi"]).optional().describe("Expected supported mode."),
+			maxGameJsonBytes: z.number().int().positive().optional().describe("Optional max bytes for game.json."),
+			maxZipBytes: z.number().int().positive().optional().describe("Optional max bytes for zipped project."),
+		},
+		async ({ directoryName, expectedMode, maxGameJsonBytes, maxZipBytes }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
+				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
+			}
+
+			const targetPath = path.isAbsolute(directoryName)
+				? path.normalize(directoryName)
+				: path.resolve(process.cwd(), directoryName);
+
+			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const gameJsonPath = path.resolve(targetPath, "game.json");
+			if (!fs.existsSync(gameJsonPath) || !fs.statSync(gameJsonPath).isFile()) {
+				return { content: [{ type: "text", text: "Error: game.json not found." }], isError: true };
+			}
+
+			const errors = [];
+			const warnings = [];
+			const infos = [];
+			let gameJson = null;
+
+			try {
+				const raw = fs.readFileSync(gameJsonPath, "utf-8");
+				gameJson = JSON.parse(raw);
+				const gameJsonBytes = Buffer.byteLength(raw, "utf-8");
+				infos.push(`game.json size: ${gameJsonBytes} bytes`);
+				if (typeof maxGameJsonBytes === "number" && gameJsonBytes > maxGameJsonBytes) {
+					errors.push(`game.json exceeds maxGameJsonBytes (${gameJsonBytes} > ${maxGameJsonBytes})`);
+				}
+			} catch (error) {
+				const message = error && error.message ? error.message : "Unknown error";
+				return { content: [{ type: "text", text: `Error: Failed to parse game.json: ${message}` }], isError: true };
+			}
+
+			const requiredFields = ["width", "height", "fps", "main", "assets"];
+			for (const key of requiredFields) {
+				if (!(key in gameJson)) {
+					errors.push(`Missing required game.json field: ${key}`);
+				}
+			}
+
+			if (typeof gameJson.width !== "number" || gameJson.width <= 0) {
+				errors.push("Invalid width: must be a positive number.");
+			}
+			if (typeof gameJson.height !== "number" || gameJson.height <= 0) {
+				errors.push("Invalid height: must be a positive number.");
+			}
+			if (typeof gameJson.fps !== "number" || gameJson.fps <= 0) {
+				errors.push("Invalid fps: must be a positive number.");
+			}
+			if (typeof gameJson.main !== "string" || !gameJson.main.startsWith("./")) {
+				warnings.push("main should be a relative path starting with './'.");
+			}
+
+			const environment = gameJson.environment && typeof gameJson.environment === "object" ? gameJson.environment : null;
+			const nicolive = environment && environment.nicolive && typeof environment.nicolive === "object" ? environment.nicolive : null;
+			const supportedModes = nicolive && Array.isArray(nicolive.supportedModes) ? nicolive.supportedModes : null;
+
+			if (!environment) {
+				warnings.push("environment is missing.");
+			}
+			if (!nicolive) {
+				warnings.push("environment.nicolive is missing.");
+			}
+			if (!supportedModes || supportedModes.length === 0) {
+				warnings.push("environment.nicolive.supportedModes is missing or empty.");
+			} else {
+				infos.push(`supportedModes: ${supportedModes.join(", ")}`);
+				if (expectedMode && !supportedModes.includes(expectedMode)) {
+					errors.push(`expectedMode '${expectedMode}' is not included in supportedModes.`);
+				}
+			}
+
+			const rankingMode = (supportedModes && supportedModes.includes("ranking")) || expectedMode === "ranking";
+			if (rankingMode) {
+				const psp = nicolive && nicolive.preferredSessionParameters;
+				const ttl = psp && psp.totalTimeLimit;
+				if (typeof ttl !== "number" || ttl <= 0) {
+					warnings.push("ranking mode: preferredSessionParameters.totalTimeLimit is missing or invalid.");
+				}
+			}
+
+			const assets = gameJson.assets && typeof gameJson.assets === "object" ? gameJson.assets : null;
+			if (!assets) {
+				errors.push("assets is missing or invalid.");
+			} else {
+				const knownTypes = new Set(["image", "audio", "script", "text", "vector-image"]);
+				for (const [assetId, asset] of Object.entries(assets)) {
+					if (!asset || typeof asset !== "object") {
+						errors.push(`assets.${assetId} is not an object.`);
+						continue;
+					}
+					if (typeof asset.type !== "string") {
+						errors.push(`assets.${assetId}.type is missing.`);
+						continue;
+					}
+					if (!knownTypes.has(asset.type)) {
+						warnings.push(`assets.${assetId}.type '${asset.type}' is not in common known types.`);
+					}
+					if (typeof asset.path !== "string" || asset.path.length === 0) {
+						errors.push(`assets.${assetId}.path is missing.`);
+						continue;
+					}
+
+					const normalizedAssetPath = asset.path.startsWith("./") ? asset.path.slice(2) : asset.path;
+					const resolvedAssetPath = path.resolve(targetPath, normalizedAssetPath);
+					if (!resolvedAssetPath.startsWith(targetPath)) {
+						errors.push(`assets.${assetId}.path points outside project: ${asset.path}`);
+						continue;
+					}
+
+					if (asset.type === "audio") {
+						if (asset.systemId && !["sound", "music"].includes(asset.systemId)) {
+							warnings.push(`assets.${assetId}.systemId '${asset.systemId}' is unusual (common: sound/music).`);
+						}
+						const audioCandidates = [".ogg", ".m4a", ".aac", ".mp3", ".wav", ".mp4"]
+							.map((ext) => `${resolvedAssetPath}${ext}`);
+						const audioExists = audioCandidates.some((filePath) => fs.existsSync(filePath));
+						if (!audioExists) {
+							warnings.push(`Audio source not found for assets.${assetId} (checked extension candidates from '${asset.path}').`);
+						}
+					} else if (!fs.existsSync(resolvedAssetPath)) {
+						errors.push(`Asset file not found: assets.${assetId}.path='${asset.path}'`);
+					}
+
+					if (asset.type === "script" && asset.global !== true) {
+						errors.push(`assets.${assetId} is script but global is not true.`);
+					}
+				}
+			}
+
+			try {
+				const zip = new AdmZip();
+				zip.addLocalFolder(targetPath);
+				const zipBytes = zip.toBuffer().length;
+				infos.push(`zip size: ${zipBytes} bytes`);
+				if (typeof maxZipBytes === "number" && zipBytes > maxZipBytes) {
+					errors.push(`Zipped project exceeds maxZipBytes (${zipBytes} > ${maxZipBytes})`);
+				}
+			} catch (error) {
+				const message = error && error.message ? error.message : "Unknown error";
+				warnings.push(`Failed to measure zip size: ${message}`);
+			}
+
+			const lines = [];
+			lines.push("Niconama compliance report");
+			lines.push(`Project: ${targetPath}`);
+			lines.push(`Status: ${errors.length > 0 ? "FAILED" : "PASSED_WITH_WARNINGS_OR_INFO"}`);
+			if (errors.length > 0) {
+				lines.push("");
+				lines.push("[Errors]");
+				for (const item of errors) lines.push(`- ${item}`);
+			}
+			if (warnings.length > 0) {
+				lines.push("");
+				lines.push("[Warnings]");
+				for (const item of warnings) lines.push(`- ${item}`);
+			}
+			if (infos.length > 0) {
+				lines.push("");
+				lines.push("[Info]");
+				for (const item of infos) lines.push(`- ${item}`);
+			}
+
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				isError: errors.length > 0,
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
 	// Prompt: ニコ生ゲーム設計者 (design_niconama_game)
 	// ---------------------------------------------------------------
 	server.prompt(
@@ -1324,6 +1795,48 @@ ${genreInfo}
 * 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
   * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
 `
+						}
+					}
+				]
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Prompt: ニコ生ゲーム仕様レビュー (review_niconama_compliance)
+	// ---------------------------------------------------------------
+	server.prompt(
+		"review_niconama_compliance",
+		"Review Niconama game compliance against Akashic/Nicolive requirements.",
+		{
+			targetDir: z.string().describe("Target project directory path."),
+			expectedMode: z.enum(["ranking", "multi"]).optional().describe("Expected Niconama mode."),
+		},
+		({ targetDir, expectedMode }) => {
+			const modeLine = expectedMode ? `期待モード: ${expectedMode}` : "期待モード: 未指定";
+			return {
+				messages: [
+					{
+						role: "user",
+						content: {
+							type: "text",
+							text: `あなたはニコ生ゲームの仕様適合レビュアーです。以下を実施してください。
+
+対象ディレクトリ: ${targetDir}
+${modeLine}
+
+## 進め方
+1. search_akashic_docs を使って、Akashic Engine v3 とニコ生ゲーム仕様の確認項目を洗い出す。
+2. validate_niconama_spec を使って、対象プロジェクトの機械検証を行う。
+3. read_project_files を使って、必要なファイル（game.json, script/main.js, script/_bootstrap.js, README.md など）を確認する。
+4. 仕様違反・公開前リスク・改善提案を整理する。
+
+## 出力形式
+* 実装は変更しない。レビュー結果のみを返す。
+* 重要度順に「Critical / High / Medium / Low」で列挙する。
+* 各指摘に「根拠」「影響」「修正方針」を付ける。
+* 最後に「リリース判定（Go / Conditional Go / No-Go）」を1つ示す。
+* 情報不足がある場合は「追加確認事項」を箇条書きで示す。`
 						}
 					}
 				]
