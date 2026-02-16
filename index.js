@@ -389,10 +389,10 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 6: Local asset import (import_external_assets)
+	// Tool 6: Local asset import (import_local_assets)
 	// ---------------------------------------------------------------
 	server.tool(
-		"import_external_assets",
+		"import_local_assets",
 		"Import local image/audio assets into the project.",
 		{
 			directoryName: z.string().describe("Project directory path (relative or absolute)."),
@@ -670,141 +670,6 @@ async function createMcpServer() {
 				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
 					content: [{ type: "text", text: `Error running complete-audio: ${message}${stdout}${stderr}` }],
-					isError: true,
-				};
-			}
-		}
-	);
-
-	// ---------------------------------------------------------------
-	// Tool 8: Headless test (headless_akashic_test)
-	// ---------------------------------------------------------------
-	server.tool(
-		"headless_akashic_test",
-		"Run a headless-akashic test to validate scene and entity expectations.",
-		{
-			directoryName: z.string().describe("Project directory path (relative or absolute)."),
-			expectedSceneName: z.string().optional().describe("Expected scene name to assert."),
-			expectedEntityTypes: z.array(z.string()).optional().describe("Expected entity types, e.g. ['Sprite','Label']."),
-			expectedMinEntities: z.number().int().min(0).optional().describe("Minimum number of entities in the active scene."),
-			gameJsonPath: z.string().optional().describe("Path to game.json (relative to directoryName). Defaults to 'game.json'.")
-		},
-		async ({ directoryName, expectedSceneName, expectedEntityTypes, expectedMinEntities, gameJsonPath }) => {
-			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
-				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
-			}
-
-			if (!expectedSceneName && (!expectedEntityTypes || expectedEntityTypes.length === 0) && expectedMinEntities === undefined) {
-				return { content: [{ type: "text", text: "Error: Provide at least one expectation (scene name, entity types, or min entity count)." }], isError: true };
-			}
-
-			const targetPath = path.isAbsolute(directoryName)
-				? path.normalize(directoryName)
-				: path.resolve(process.cwd(), directoryName);
-
-			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
-				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
-			}
-
-			const headlessModulePath = path.resolve(targetPath, "node_modules", "@akashic", "headless-akashic");
-			if (!fs.existsSync(headlessModulePath)) {
-				return { content: [{ type: "text", text: "Error: @akashic/headless-akashic is not installed in the project." }], isError: true };
-			}
-
-			const testDir = path.resolve(targetPath, ".mcp");
-			const testFilePath = path.resolve(testDir, "headless-test.js");
-			const resolvedGameJsonPath = path.resolve(
-				targetPath,
-				gameJsonPath && gameJsonPath.trim() ? gameJsonPath : "game.json"
-			);
-
-			if (!fs.existsSync(resolvedGameJsonPath)) {
-				return { content: [{ type: "text", text: `Error: game.json not found at ${resolvedGameJsonPath}.` }], isError: true };
-			}
-
-			try {
-				fs.mkdirSync(testDir, { recursive: true });
-				const testCode = [
-					"const assert = require(\"node:assert\");",
-					"const { GameContext } = require(\"@akashic/headless-akashic\");",
-					"",
-					"function parseJsonEnv(name, fallback) {",
-					"\tif (!process.env[name]) return fallback;",
-					"\ttry {",
-					"\t\treturn JSON.parse(process.env[name]);",
-					"\t} catch {",
-					"\t\treturn fallback;",
-					"\t}",
-					"}",
-					"",
-					"(async () => {",
-					"\tconst gameJsonPath = process.env.GAME_JSON_PATH;",
-					"\tif (!gameJsonPath) throw new Error(\"GAME_JSON_PATH is required\");",
-					"",
-					"\tconst expectedSceneName = process.env.EXPECTED_SCENE_NAME || \"\";",
-					"\tconst expectedEntityTypes = parseJsonEnv(\"EXPECTED_ENTITY_TYPES\", []);",
-					"\tconst expectedMinEntities = process.env.EXPECTED_MIN_ENTITIES ? Number(process.env.EXPECTED_MIN_ENTITIES) : null;",
-					"",
-					"\tconst context = new GameContext({ gameJsonPath });",
-					"\tconst client = await context.getGameClient();",
-					"\tconst game = client.game;",
-					"\tconst ageBefore = game.age;",
-					"\tawait client.advance();",
-					"\tconst ageAfter = game.age;",
-					"\tassert(ageAfter > ageBefore, \"g.game.age did not advance\");",
-					"\tawait client.advanceUntil(() => game.scene() && game.scene().loaded);",
-					"\tconst scene = game.scene();",
-					"\tassert(scene, \"Scene is not available\");",
-					"",
-					"\tif (expectedSceneName) {",
-					"\t\tassert.strictEqual(scene.name, expectedSceneName, \"Scene name mismatch\");",
-					"\t}",
-					"",
-					"\tif (expectedMinEntities !== null) {",
-					"\t\tassert(scene.children.length >= expectedMinEntities, \"Not enough entities in scene\");",
-					"\t}",
-					"",
-					"\tif (Array.isArray(expectedEntityTypes) && expectedEntityTypes.length > 0) {",
-					"\t\tfor (const typeName of expectedEntityTypes) {",
-					"\t\t\tconst ctor = client.g[typeName];",
-					"\t\t\tassert(ctor, `Unknown entity type: ${typeName}`);",
-					"\t\t\tconst found = scene.children.some((child) => child instanceof ctor);",
-					"\t\t\tassert(found, `Entity type not found in scene: ${typeName}`);",
-					"\t\t}",
-					"\t}",
-					"",
-					"\tawait context.destroy();",
-					"\tconsole.log(\"headless-akashic check passed\");",
-					"})().catch((err) => {",
-					"\tconsole.error(err && err.stack ? err.stack : String(err));",
-					"\tprocess.exit(1);",
-					"});",
-					""
-				].join("\n");
-
-				fs.writeFileSync(testFilePath, testCode);
-				const envParts = [
-					`GAME_JSON_PATH="${resolvedGameJsonPath}"`,
-					expectedSceneName ? `EXPECTED_SCENE_NAME="${expectedSceneName}"` : null,
-					expectedEntityTypes && expectedEntityTypes.length > 0
-						? `EXPECTED_ENTITY_TYPES='${JSON.stringify(expectedEntityTypes)}'`
-						: null,
-					typeof expectedMinEntities === "number"
-						? `EXPECTED_MIN_ENTITIES="${expectedMinEntities}"`
-						: null
-				].filter(Boolean);
-				const command = `cd "${targetPath}" && ${envParts.join(" ")} node "${testFilePath}"`;
-				const { stdout, stderr } = await execAsync(command);
-				const output = [stdout, stderr].filter(Boolean).join("\n");
-				return {
-					content: [{ type: "text", text: output || "headless-akashic check passed." }]
-				};
-			} catch (error) {
-				const message = error && error.message ? error.message : "Unknown error";
-				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
-				return {
-					content: [{ type: "text", text: `Error during headless test: ${message}${stdout}${stderr}` }],
 					isError: true,
 				};
 			}
@@ -1397,43 +1262,6 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 11: Project zip (zip_project_base64)
-	// ---------------------------------------------------------------
-	server.tool(
-		"zip_project_base64",
-		"Zip an Akashic project directory and return the zip as base64.",
-		{
-			directoryName: z.string().describe("Relative or absolute directory path of the project to zip."),
-			zipFileName: z.string().optional().describe("Optional zip file name (e.g., 'game.zip')."),
-		},
-		async ({ directoryName, zipFileName }) => {
-			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
-				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
-			}
-
-			const targetPath = path.isAbsolute(directoryName)
-				? path.normalize(directoryName)
-				: path.resolve(process.cwd(), directoryName);
-			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
-				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
-			}
-
-			try {
-				const zip = new AdmZip();
-				zip.addLocalFolder(targetPath);
-				const buffer = zip.toBuffer();
-				const base64 = buffer.toString("base64");
-				const name = zipFileName || `${path.basename(directoryName)}.zip`;
-				return {
-					content: [{ type: "text", text: JSON.stringify({ fileName: name, base64 }) }]
-				};
-			} catch (error) {
-				return { content: [{ type: "text", text: `Error creating zip: ${error.message}` }], isError: true };
-			}
-		}
-	);
-
-	// ---------------------------------------------------------------
 	// Tool 15: Validate Niconama spec (validate_niconama_spec)
 	// ---------------------------------------------------------------
 	server.tool(
@@ -1562,7 +1390,7 @@ async function createMcpServer() {
 						if (asset.systemId && !["sound", "music"].includes(asset.systemId)) {
 							warnings.push(`assets.${assetId}.systemId '${asset.systemId}' is unusual (common: sound/music).`);
 						}
-						const audioCandidates = [".ogg", ".m4a", ".aac", ".mp3", ".wav", ".mp4"]
+						const audioCandidates = [".ogg", ".m4a", ".aac"]
 							.map((ext) => `${resolvedAssetPath}${ext}`);
 						const audioExists = audioCandidates.some((filePath) => fs.existsSync(filePath));
 						if (!audioExists) {
@@ -1718,7 +1546,7 @@ ${genreInfo}
      * audio：音声
      * text：テキスト
      * game.json
-   * 素材の入手元が指定されている場合は、import_external_assets を使ってプロジェクト内に配置する。
+   * 素材の入手元が指定されている場合は、import_local_assets を使ってプロジェクト内に配置する。
      * 新規プロジェクトの場合、画像は image ディレクトリ、音声は audio ディレクトリに配置する。
      * 既存プロジェクトの場合、game.json やディレクトリ構造を見て配置場所を推測すること
        * 画像や音声の配置場所がないときは、image ディレクトリや audioディレクトリを新規作成してそこに配置する
@@ -1736,11 +1564,16 @@ ${genreInfo}
      * [読み込んだアセットを取得する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html )
    * ランキングゲームの場合は、[ランキングゲーム | Akashic Engine](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。
    * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
-   * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
+   * format_with_eslint は新規作成や大規模変更のときだけ実行し、小さな差分なら省略する。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
    * 明示的に必要と言われない限り game.json を変更しない。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
-7. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
+7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
+8. **デバッグ**：akashic_serve を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
+   * このデバッグ処理は時間がかかるため、以下に該当する時のみ行うこと
+     * プロジェクトの新規作成時
+	 * プロジェクトの大規模変更時
+	 * ゲームが動かないといった重大なバグの修正時
 
 ## 実装上の注意
 * 必要なコメントを付けること。
@@ -1795,48 +1628,6 @@ ${genreInfo}
 * 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
   * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
 `
-						}
-					}
-				]
-			};
-		}
-	);
-
-	// ---------------------------------------------------------------
-	// Prompt: ニコ生ゲーム仕様レビュー (review_niconama_compliance)
-	// ---------------------------------------------------------------
-	server.prompt(
-		"review_niconama_compliance",
-		"Review Niconama game compliance against Akashic/Nicolive requirements.",
-		{
-			targetDir: z.string().describe("Target project directory path."),
-			expectedMode: z.enum(["ranking", "multi"]).optional().describe("Expected Niconama mode."),
-		},
-		({ targetDir, expectedMode }) => {
-			const modeLine = expectedMode ? `期待モード: ${expectedMode}` : "期待モード: 未指定";
-			return {
-				messages: [
-					{
-						role: "user",
-						content: {
-							type: "text",
-							text: `あなたはニコ生ゲームの仕様適合レビュアーです。以下を実施してください。
-
-対象ディレクトリ: ${targetDir}
-${modeLine}
-
-## 進め方
-1. search_akashic_docs を使って、Akashic Engine v3 とニコ生ゲーム仕様の確認項目を洗い出す。
-2. validate_niconama_spec を使って、対象プロジェクトの機械検証を行う。
-3. read_project_files を使って、必要なファイル（game.json, script/main.js, script/_bootstrap.js, README.md など）を確認する。
-4. 仕様違反・公開前リスク・改善提案を整理する。
-
-## 出力形式
-* 実装は変更しない。レビュー結果のみを返す。
-* 重要度順に「Critical / High / Medium / Low」で列挙する。
-* 各指摘に「根拠」「影響」「修正方針」を付ける。
-* 最後に「リリース判定（Go / Conditional Go / No-Go）」を1つ示す。
-* 情報不足がある場合は「追加確認事項」を箇条書きで示す。`
 						}
 					}
 				]

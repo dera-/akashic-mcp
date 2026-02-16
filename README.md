@@ -28,7 +28,7 @@ POST http://localhost:8080/proxy/call
 - init_minimal_template: template/ から最小テンプレートをコピー
 - akashic_scan_asset: akashic scan asset 実行
 - akashic_install_extension: Akashic 拡張ライブラリを akashic install で導入
-- import_external_assets: 許可ドメインから素材を取得し image/audio に配置
+- import_local_assets: 許可ドメインから素材を取得し image/audio に配置
 - headless_akashic_test: headless-akashic による簡易テスト
 - format_with_eslint: @akashic/eslint-config による整形
 - write_project_readme: ゲームの README.md を作成
