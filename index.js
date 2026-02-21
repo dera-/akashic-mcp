@@ -1401,7 +1401,6 @@ ${genreInfo}
    * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
    * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
-   * 明示的に必要と言われない限り game.json を変更しない。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
 8. **デバッグ**：headless_akashic_test を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
@@ -1440,14 +1439,15 @@ ${genreInfo}
   * 手動編集を許可するのは以下の場合のみ：
     * アセットをグローバル化する（"global": true を追加）
     * type: "audio" のアセットの systemId を変更する
-	  * 音声をループする(BGMにする)時のみ、systemId を "music" に変更する
+      * 音声をループする(BGMにする)時のみ、systemId を "music" に変更する
     * ランキングの制限時間を変更する（environment.nicolive.preferredSessionParameters.totalTimeLimit）
       * totalTimeLimit は秒単位（例：90 は 90 秒）
+    * ユーザー入力プロンプトで直接指定があった場合
   * 変更が必要な場合は以下を参照：
     * [game.json の仕様 | Akashic Engine](https://akashic-games.github.io/reference/manifest/game-json.html)
     * main キーは ./ を含める必要がある（例："./script/_bootstrap.js"）
-    * environment.sandbox-runtime と environment.nicolive.supportedModes は変更しない
     * type: "script" のアセットはグローバルである必要がある（"global": true）
+    * environment.sandbox-runtime の値は "3" とする
 * エンティティ(g.E を継承しているオブジェクト)にタップやスワイプを行う場合、そのエンティティに touchable: true を付与すること
 * エンティティ(g.E を継承しているオブジェクト)を表示する時は show() メソッドを、非表示にする時は hide() メソッドを使ってください(この時に限っては modified() メソッド呼び出しは不要です)。
 * g.Label は改行できないので、複数行のテキストを画面に表示する場合は、行数分の g.Label を生成すること
@@ -1458,6 +1458,8 @@ ${genreInfo}
   * [フレームアニメーション (パラパラアニメ) する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/frame-animation.html)
 * 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
   * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
+* エンティティ(g.E を継承しているオブジェクト)をドラッグ・スワイプする場合は、g.E#onPointMove トリガーを利用すること。詳細は以下を参照：
+  * [ドラッグ・スワイプで動かす | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/operation/drag.html)
 `
 						}
 					}
