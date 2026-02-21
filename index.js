@@ -8,6 +8,7 @@ import path from 'path';
 import http from 'http';
 import { exec } from 'child_process';
 import util from 'util';
+import AdmZip from "adm-zip";
 
 // execをPromise化して非同期処理しやすくする
 const execAsync = util.promisify(exec);
@@ -1418,10 +1419,6 @@ ${genreInfo}
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
 8. **デバッグ**：headless_akashic_test を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
-   * このデバッグ処理は時間がかかるため、以下に該当する時のみ行うこと
-     * プロジェクトの新規作成時
-     * プロジェクトの大規模変更時
-     * ゲームが動かないといった重大なバグの修正時
 
 ## 実装上の注意
 * 必要なコメントを付けること。
