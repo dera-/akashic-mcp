@@ -3,7 +3,6 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { z } from "zod";
-import AdmZip from "adm-zip";
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
@@ -389,10 +388,10 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 6: Local asset import (import_external_assets)
+	// Tool 6: Local asset import (import_local_assets)
 	// ---------------------------------------------------------------
 	server.tool(
-		"import_external_assets",
+		"import_local_assets",
 		"Import local image/audio assets into the project.",
 		{
 			directoryName: z.string().describe("Project directory path (relative or absolute)."),
@@ -1111,16 +1110,18 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 11: Project zip (zip_project_base64)
+	// Tool 13: Validate Niconama spec (validate_niconama_spec)
 	// ---------------------------------------------------------------
 	server.tool(
-		"zip_project_base64",
-		"Zip an Akashic project directory and return the zip as base64.",
+		"validate_niconama_spec",
+		"Validate a Niconama (Akashic) project against common manifest/asset compliance checks.",
 		{
-			directoryName: z.string().describe("Relative or absolute directory path of the project to zip."),
-			zipFileName: z.string().optional().describe("Optional zip file name (e.g., 'game.zip')."),
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			expectedMode: z.enum(["ranking", "multi"]).optional().describe("Expected supported mode."),
+			maxGameJsonBytes: z.number().int().positive().optional().describe("Optional max bytes for game.json."),
+			maxZipBytes: z.number().int().positive().optional().describe("Optional max bytes for zipped project."),
 		},
-		async ({ directoryName, zipFileName }) => {
+		async ({ directoryName, expectedMode, maxGameJsonBytes, maxZipBytes }) => {
 			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
 				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
 			}
@@ -1128,22 +1129,168 @@ async function createMcpServer() {
 			const targetPath = path.isAbsolute(directoryName)
 				? path.normalize(directoryName)
 				: path.resolve(process.cwd(), directoryName);
+
 			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
 				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
+			}
+
+			const gameJsonPath = path.resolve(targetPath, "game.json");
+			if (!fs.existsSync(gameJsonPath) || !fs.statSync(gameJsonPath).isFile()) {
+				return { content: [{ type: "text", text: "Error: game.json not found." }], isError: true };
+			}
+
+			const errors = [];
+			const warnings = [];
+			const infos = [];
+			let gameJson = null;
+
+			try {
+				const raw = fs.readFileSync(gameJsonPath, "utf-8");
+				gameJson = JSON.parse(raw);
+				const gameJsonBytes = Buffer.byteLength(raw, "utf-8");
+				infos.push(`game.json size: ${gameJsonBytes} bytes`);
+				if (typeof maxGameJsonBytes === "number" && gameJsonBytes > maxGameJsonBytes) {
+					errors.push(`game.json exceeds maxGameJsonBytes (${gameJsonBytes} > ${maxGameJsonBytes})`);
+				}
+			} catch (error) {
+				const message = error && error.message ? error.message : "Unknown error";
+				return { content: [{ type: "text", text: `Error: Failed to parse game.json: ${message}` }], isError: true };
+			}
+
+			const requiredFields = ["width", "height", "fps", "main", "assets"];
+			for (const key of requiredFields) {
+				if (!(key in gameJson)) {
+					errors.push(`Missing required game.json field: ${key}`);
+				}
+			}
+
+			if (typeof gameJson.width !== "number" || gameJson.width <= 0) {
+				errors.push("Invalid width: must be a positive number.");
+			}
+			if (typeof gameJson.height !== "number" || gameJson.height <= 0) {
+				errors.push("Invalid height: must be a positive number.");
+			}
+			if (typeof gameJson.fps !== "number" || gameJson.fps <= 0) {
+				errors.push("Invalid fps: must be a positive number.");
+			}
+			if (typeof gameJson.main !== "string" || !gameJson.main.startsWith("./")) {
+				warnings.push("main should be a relative path starting with './'.");
+			}
+
+			const environment = gameJson.environment && typeof gameJson.environment === "object" ? gameJson.environment : null;
+			const nicolive = environment && environment.nicolive && typeof environment.nicolive === "object" ? environment.nicolive : null;
+			const supportedModes = nicolive && Array.isArray(nicolive.supportedModes) ? nicolive.supportedModes : null;
+
+			if (!environment) {
+				warnings.push("environment is missing.");
+			}
+			if (!nicolive) {
+				warnings.push("environment.nicolive is missing.");
+			}
+			if (!supportedModes || supportedModes.length === 0) {
+				warnings.push("environment.nicolive.supportedModes is missing or empty.");
+			} else {
+				infos.push(`supportedModes: ${supportedModes.join(", ")}`);
+				if (expectedMode && !supportedModes.includes(expectedMode)) {
+					errors.push(`expectedMode '${expectedMode}' is not included in supportedModes.`);
+				}
+			}
+
+			const rankingMode = (supportedModes && supportedModes.includes("ranking")) || expectedMode === "ranking";
+			if (rankingMode) {
+				const psp = nicolive && nicolive.preferredSessionParameters;
+				const ttl = psp && psp.totalTimeLimit;
+				if (typeof ttl !== "number" || ttl <= 0) {
+					warnings.push("ranking mode: preferredSessionParameters.totalTimeLimit is missing or invalid.");
+				}
+			}
+
+			const assets = gameJson.assets && typeof gameJson.assets === "object" ? gameJson.assets : null;
+			if (!assets) {
+				errors.push("assets is missing or invalid.");
+			} else {
+				const knownTypes = new Set(["image", "audio", "script", "text", "vector-image"]);
+				for (const [assetId, asset] of Object.entries(assets)) {
+					if (!asset || typeof asset !== "object") {
+						errors.push(`assets.${assetId} is not an object.`);
+						continue;
+					}
+					if (typeof asset.type !== "string") {
+						errors.push(`assets.${assetId}.type is missing.`);
+						continue;
+					}
+					if (!knownTypes.has(asset.type)) {
+						warnings.push(`assets.${assetId}.type '${asset.type}' is not in common known types.`);
+					}
+					if (typeof asset.path !== "string" || asset.path.length === 0) {
+						errors.push(`assets.${assetId}.path is missing.`);
+						continue;
+					}
+
+					const normalizedAssetPath = asset.path.startsWith("./") ? asset.path.slice(2) : asset.path;
+					const resolvedAssetPath = path.resolve(targetPath, normalizedAssetPath);
+					if (!resolvedAssetPath.startsWith(targetPath)) {
+						errors.push(`assets.${assetId}.path points outside project: ${asset.path}`);
+						continue;
+					}
+
+					if (asset.type === "audio") {
+						if (asset.systemId && !["sound", "music"].includes(asset.systemId)) {
+							warnings.push(`assets.${assetId}.systemId '${asset.systemId}' is unusual (common: sound/music).`);
+						}
+						const audioCandidates = [".ogg", ".m4a", ".aac"]
+							.map((ext) => `${resolvedAssetPath}${ext}`);
+						const audioExists = audioCandidates.some((filePath) => fs.existsSync(filePath));
+						if (!audioExists) {
+							warnings.push(`Audio source not found for assets.${assetId} (checked extension candidates from '${asset.path}').`);
+						}
+					} else if (!fs.existsSync(resolvedAssetPath)) {
+						errors.push(`Asset file not found: assets.${assetId}.path='${asset.path}'`);
+					}
+
+					if (asset.type === "script" && asset.global !== true) {
+						errors.push(`assets.${assetId} is script but global is not true.`);
+					}
+				}
 			}
 
 			try {
 				const zip = new AdmZip();
 				zip.addLocalFolder(targetPath);
-				const buffer = zip.toBuffer();
-				const base64 = buffer.toString("base64");
-				const name = zipFileName || `${path.basename(directoryName)}.zip`;
-				return {
-					content: [{ type: "text", text: JSON.stringify({ fileName: name, base64 }) }]
-				};
+				const zipBytes = zip.toBuffer().length;
+				infos.push(`zip size: ${zipBytes} bytes`);
+				if (typeof maxZipBytes === "number" && zipBytes > maxZipBytes) {
+					errors.push(`Zipped project exceeds maxZipBytes (${zipBytes} > ${maxZipBytes})`);
+				}
 			} catch (error) {
-				return { content: [{ type: "text", text: `Error creating zip: ${error.message}` }], isError: true };
+				const message = error && error.message ? error.message : "Unknown error";
+				warnings.push(`Failed to measure zip size: ${message}`);
 			}
+
+			const lines = [];
+			lines.push("Niconama compliance report");
+			lines.push(`Project: ${targetPath}`);
+			lines.push(`Status: ${errors.length > 0 ? "FAILED" : "PASSED_WITH_WARNINGS_OR_INFO"}`);
+			if (errors.length > 0) {
+				lines.push("");
+				lines.push("[Errors]");
+				for (const item of errors) lines.push(`- ${item}`);
+			}
+			if (warnings.length > 0) {
+				lines.push("");
+				lines.push("[Warnings]");
+				for (const item of warnings) lines.push(`- ${item}`);
+			}
+			if (infos.length > 0) {
+				lines.push("");
+				lines.push("[Info]");
+				for (const item of infos) lines.push(`- ${item}`);
+			}
+
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				isError: errors.length > 0,
+			};
 		}
 	);
 
@@ -1247,7 +1394,7 @@ ${genreInfo}
      * audio：音声
      * text：テキスト
      * game.json
-   * 素材の入手元が指定されている場合は、import_external_assets を使ってプロジェクト内に配置する。
+   * 素材の入手元が指定されている場合は、import_local_assets を使ってプロジェクト内に配置する。
      * 新規プロジェクトの場合、画像は image ディレクトリ、音声は audio ディレクトリに配置する。
      * 既存プロジェクトの場合、game.json やディレクトリ構造を見て配置場所を推測すること
        * 画像や音声の配置場所がないときは、image ディレクトリや audioディレクトリを新規作成してそこに配置する
@@ -1269,7 +1416,12 @@ ${genreInfo}
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
    * 明示的に必要と言われない限り game.json を変更しない。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
-7. **デバッグ**：headless_akashic_test は大きな変更や新規プロジェクトの場合のみ実行する。失敗した場合は先に修正してから進める。
+7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
+8. **デバッグ**：headless_akashic_test を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
+   * このデバッグ処理は時間がかかるため、以下に該当する時のみ行うこと
+     * プロジェクトの新規作成時
+     * プロジェクトの大規模変更時
+     * ゲームが動かないといった重大なバグの修正時
 
 ## 実装上の注意
 * 必要なコメントを付けること。
