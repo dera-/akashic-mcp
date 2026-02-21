@@ -8,7 +8,6 @@ import path from 'path';
 import http from 'http';
 import { exec } from 'child_process';
 import util from 'util';
-import AdmZip from "adm-zip";
 
 // execをPromise化して非同期処理しやすくする
 const execAsync = util.promisify(exec);
@@ -1253,19 +1252,6 @@ async function createMcpServer() {
 						errors.push(`assets.${assetId} is script but global is not true.`);
 					}
 				}
-			}
-
-			try {
-				const zip = new AdmZip();
-				zip.addLocalFolder(targetPath);
-				const zipBytes = zip.toBuffer().length;
-				infos.push(`zip size: ${zipBytes} bytes`);
-				if (typeof maxZipBytes === "number" && zipBytes > maxZipBytes) {
-					errors.push(`Zipped project exceeds maxZipBytes (${zipBytes} > ${maxZipBytes})`);
-				}
-			} catch (error) {
-				const message = error && error.message ? error.message : "Unknown error";
-				warnings.push(`Failed to measure zip size: ${message}`);
 			}
 
 			const lines = [];
