@@ -1,7 +1,7 @@
 # akashic-mcp
 
 ## 概要説明
-Akashic Engine 向けの MCP サーバーです。ドキュメント検索、プロジェクト初期化、ファイル生成、アセットスキャン、ZIP 生成などをツールとして提供します。
+Akashic Engine 向けの MCP サーバーです。ドキュメント検索、プロジェクト初期化、ファイル生成、アセット運用、ローカル実行チェック、仕様検証などをツールとして提供します。
 
 ## MCP利用方法
 1) 依存をインストールしてサーバーを起動します。
@@ -28,14 +28,18 @@ POST http://localhost:8080/proxy/call
 - init_minimal_template: template/ から最小テンプレートをコピー
 - akashic_scan_asset: akashic scan asset 実行
 - akashic_install_extension: Akashic 拡張ライブラリを akashic install で導入
-- import_local_assets: 許可ドメインから素材を取得し image/audio に配置
-- headless_akashic_test: headless-akashic による簡易テスト
+- import_local_assets: ローカル素材を image/audio に配置
+- run_complete_audio: 音声をニコ生向け形式に変換し不要形式を整理
+- akashic_serve: 一定時間 `akashic serve` で実行しブラウザコンソールを検査
 - format_with_eslint: @akashic/eslint-config による整形
+- check_js_syntax: `node --check` で JavaScript 構文を検証
+- read_project_files: プロジェクト内テキストファイルを一括取得
 - write_project_readme: ゲームの README.md を作成
-- zip_project_base64: プロジェクトを ZIP 化して base64 で返す
+- validate_niconama_spec: game.json/asset/モード整合性の仕様チェック
 
 提供プロンプト:
-- design_niconama_game: ニコ生ゲーム向けの設計/実装ガイドライン
+- design_niconama_game: ニコ生ゲームの要件定義・基本設計支援
+- implement_niconama_game: ニコ生ゲーム実装フローと制約に沿った実装ガイド
 
 ## 開発者向け(ビルド方法、スクリプトの説明)
 起動:
@@ -51,7 +55,6 @@ npm start
 
 データ:
 - data/akashic_docs.json: ドキュメント検索用のキャッシュ
-- data/headless-akashic.json: headless-akashic 参照資料
 - data/eslint-config.json: eslint-config 参照資料
 - data/complete-audio.json: complete-audio 参照資料
 

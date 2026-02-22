@@ -6,7 +6,7 @@ import { z } from "zod";
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import util from 'util';
 
 // execをPromise化して非同期処理しやすくする
@@ -676,137 +676,288 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-	// Tool 8: Headless test (headless_akashic_test)
+	// Tool 8: Serve and inspect console (akashic_serve)
 	// ---------------------------------------------------------------
 	server.tool(
-		"headless_akashic_test",
-		"Run a headless-akashic test to validate scene and entity expectations.",
+		"akashic_serve",
+		"Serve an Akashic project for a fixed duration, inspect browser devtools console logs, and map errors to source lines.",
 		{
 			directoryName: z.string().describe("Project directory path (relative or absolute)."),
-			expectedSceneName: z.string().optional().describe("Expected scene name to assert."),
-			expectedEntityTypes: z.array(z.string()).optional().describe("Expected entity types, e.g. ['Sprite','Label']."),
-			expectedMinEntities: z.number().int().min(0).optional().describe("Minimum number of entities in the active scene."),
-			gameJsonPath: z.string().optional().describe("Path to game.json (relative to directoryName). Defaults to 'game.json'.")
+			durationMs: z.number().int().min(1000).max(120000).optional().describe("How long to run the game in milliseconds (default: 10000)."),
+			port: z.number().int().min(1).max(65535).optional().describe("Serve port (default: 3300)."),
+			entryPath: z.string().optional().describe("Path to open in browser (default: '/')."),
 		},
-		async ({ directoryName, expectedSceneName, expectedEntityTypes, expectedMinEntities, gameJsonPath }) => {
+		async ({ directoryName, durationMs, port, entryPath }) => {
 			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
 				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
-			}
-
-			if (!expectedSceneName && (!expectedEntityTypes || expectedEntityTypes.length === 0) && expectedMinEntities === undefined) {
-				return { content: [{ type: "text", text: "Error: Provide at least one expectation (scene name, entity types, or min entity count)." }], isError: true };
 			}
 
 			const targetPath = path.isAbsolute(directoryName)
 				? path.normalize(directoryName)
 				: path.resolve(process.cwd(), directoryName);
-
 			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
 				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
 			}
 
-			const headlessModulePath = path.resolve(targetPath, "node_modules", "@akashic", "headless-akashic");
-			if (!fs.existsSync(headlessModulePath)) {
-				return { content: [{ type: "text", text: "Error: @akashic/headless-akashic is not installed in the project." }], isError: true };
+			const gameJsonPath = path.resolve(targetPath, "game.json");
+			if (!fs.existsSync(gameJsonPath)) {
+				return { content: [{ type: "text", text: "Error: game.json not found in project directory." }], isError: true };
 			}
 
-			const testDir = path.resolve(targetPath, ".mcp");
-			const testFilePath = path.resolve(testDir, "headless-test.js");
-			const resolvedGameJsonPath = path.resolve(
-				targetPath,
-				gameJsonPath && gameJsonPath.trim() ? gameJsonPath : "game.json"
-			);
+			const runDurationMs = typeof durationMs === "number" ? durationMs : 10000;
+			const servePort = typeof port === "number" ? port : 3300;
+			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
+			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
 
-			if (!fs.existsSync(resolvedGameJsonPath)) {
-				return { content: [{ type: "text", text: `Error: game.json not found at ${resolvedGameJsonPath}.` }], isError: true };
-			}
+			const localAkashicBin = path.resolve(targetPath, "node_modules", ".bin", "akashic");
+			const useLocalBin = fs.existsSync(localAkashicBin);
+			const command = useLocalBin ? localAkashicBin : "npx";
+			const args = useLocalBin
+				? ["serve", "--host", "127.0.0.1", "--port", String(servePort)]
+				: ["akashic", "serve", "--host", "127.0.0.1", "--port", String(servePort)];
 
+			let chromium = null;
 			try {
-				fs.mkdirSync(testDir, { recursive: true });
-				const testCode = [
-					"const assert = require(\"node:assert\");",
-					"const { GameContext } = require(\"@akashic/headless-akashic\");",
-					"",
-					"function parseJsonEnv(name, fallback) {",
-					"\tif (!process.env[name]) return fallback;",
-					"\ttry {",
-					"\t\treturn JSON.parse(process.env[name]);",
-					"\t} catch {",
-					"\t\treturn fallback;",
-					"\t}",
-					"}",
-					"",
-					"(async () => {",
-					"\tconst gameJsonPath = process.env.GAME_JSON_PATH;",
-					"\tif (!gameJsonPath) throw new Error(\"GAME_JSON_PATH is required\");",
-					"",
-					"\tconst expectedSceneName = process.env.EXPECTED_SCENE_NAME || \"\";",
-					"\tconst expectedEntityTypes = parseJsonEnv(\"EXPECTED_ENTITY_TYPES\", []);",
-					"\tconst expectedMinEntities = process.env.EXPECTED_MIN_ENTITIES ? Number(process.env.EXPECTED_MIN_ENTITIES) : null;",
-					"",
-					"\tconst context = new GameContext({ gameJsonPath });",
-					"\tconst client = await context.getGameClient();",
-					"\tconst game = client.game;",
-					"\tconst ageBefore = game.age;",
-					"\tawait client.advance();",
-					"\tconst ageAfter = game.age;",
-					"\tassert(ageAfter > ageBefore, \"g.game.age did not advance\");",
-					"\tawait client.advanceUntil(() => game.scene() && game.scene().loaded);",
-					"\tconst scene = game.scene();",
-					"\tassert(scene, \"Scene is not available\");",
-					"",
-					"\tif (expectedSceneName) {",
-					"\t\tassert.strictEqual(scene.name, expectedSceneName, \"Scene name mismatch\");",
-					"\t}",
-					"",
-					"\tif (expectedMinEntities !== null) {",
-					"\t\tassert(scene.children.length >= expectedMinEntities, \"Not enough entities in scene\");",
-					"\t}",
-					"",
-					"\tif (Array.isArray(expectedEntityTypes) && expectedEntityTypes.length > 0) {",
-					"\t\tfor (const typeName of expectedEntityTypes) {",
-					"\t\t\tconst ctor = client.g[typeName];",
-					"\t\t\tassert(ctor, `Unknown entity type: ${typeName}`);",
-					"\t\t\tconst found = scene.children.some((child) => child instanceof ctor);",
-					"\t\t\tassert(found, `Entity type not found in scene: ${typeName}`);",
-					"\t\t}",
-					"\t}",
-					"",
-					"\tawait context.destroy();",
-					"\tconsole.log(\"headless-akashic check passed\");",
-					"})().catch((err) => {",
-					"\tconsole.error(err && err.stack ? err.stack : String(err));",
-					"\tprocess.exit(1);",
-					"});",
-					""
-				].join("\n");
-
-				fs.writeFileSync(testFilePath, testCode);
-				const envParts = [
-					`GAME_JSON_PATH="${resolvedGameJsonPath}"`,
-					expectedSceneName ? `EXPECTED_SCENE_NAME="${expectedSceneName}"` : null,
-					expectedEntityTypes && expectedEntityTypes.length > 0
-						? `EXPECTED_ENTITY_TYPES='${JSON.stringify(expectedEntityTypes)}'`
-						: null,
-					typeof expectedMinEntities === "number"
-						? `EXPECTED_MIN_ENTITIES="${expectedMinEntities}"`
-						: null
-				].filter(Boolean);
-				const command = `cd "${targetPath}" && ${envParts.join(" ")} node "${testFilePath}"`;
-				const { stdout, stderr } = await execAsync(command);
-				const output = [stdout, stderr].filter(Boolean).join("\n");
+				const playwright = await import("playwright");
+				chromium = playwright.chromium;
+			} catch {
 				return {
-					content: [{ type: "text", text: output || "headless-akashic check passed." }]
+					content: [{
+						type: "text",
+						text: "Error: 'playwright' is required for akashic_serve. Install it in this MCP server project (npm install playwright)."
+					}],
+					isError: true
 				};
+			}
+
+			const stdoutLogs = [];
+			const stderrLogs = [];
+			const consoleLogs = [];
+			const errorLogs = [];
+			const pageErrors = [];
+
+			const maxLogItems = 200;
+			const pushLimited = (arr, value) => {
+				if (arr.length < maxLogItems) arr.push(value);
+			};
+
+			const serveProcess = spawn(command, args, {
+				cwd: targetPath,
+				env: process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+				shell: false
+			});
+
+			const cleanupServeProcess = async () => {
+				if (serveProcess.killed) return;
+				try {
+					serveProcess.kill("SIGTERM");
+				} catch {
+					// ignore
+				}
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				if (!serveProcess.killed) {
+					try {
+						serveProcess.kill("SIGKILL");
+					} catch {
+						// ignore
+					}
+				}
+			};
+
+			serveProcess.stdout.on("data", (chunk) => {
+				pushLimited(stdoutLogs, String(chunk).trim());
+			});
+			serveProcess.stderr.on("data", (chunk) => {
+				pushLimited(stderrLogs, String(chunk).trim());
+			});
+
+			const findFileByBaseName = (rootDir, fileName) => {
+				const skipDirs = new Set(["node_modules", ".git", ".mcp", "tmp", "dist", "build"]);
+				const walk = (dir) => {
+					const entries = fs.readdirSync(dir, { withFileTypes: true });
+					for (const entry of entries) {
+						if (entry.isDirectory()) {
+							if (skipDirs.has(entry.name)) continue;
+							const nested = walk(path.resolve(dir, entry.name));
+							if (nested) return nested;
+						} else if (entry.isFile() && entry.name === fileName) {
+							return path.resolve(dir, entry.name);
+						}
+					}
+					return null;
+				};
+				try {
+					return walk(rootDir);
+				} catch {
+					return null;
+				}
+			};
+
+			const mapErrorToSource = (text) => {
+				const patterns = [
+					/(https?:\/\/[^)\s]+\.js):(\d+):(\d+)/,
+					/(\/[^)\s]+\.js):(\d+):(\d+)/,
+					/([A-Za-z0-9_.-]+\.js):(\d+):(\d+)/
+				];
+				for (const pattern of patterns) {
+					const match = text.match(pattern);
+					if (!match) continue;
+					const rawPath = match[1];
+					const line = Number(match[2]);
+					const column = Number(match[3]);
+					let resolved = null;
+					if (/^https?:\/\//.test(rawPath)) {
+						try {
+							const u = new URL(rawPath);
+							const fromUrlPath = u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname;
+							const candidate = path.resolve(targetPath, fromUrlPath);
+							if (candidate.startsWith(targetPath) && fs.existsSync(candidate)) {
+								resolved = candidate;
+							}
+						} catch {
+							// ignore
+						}
+					} else if (rawPath.startsWith("/")) {
+						const candidate = path.resolve(targetPath, rawPath.slice(1));
+						if (candidate.startsWith(targetPath) && fs.existsSync(candidate)) {
+							resolved = candidate;
+						}
+					} else {
+						const direct = path.resolve(targetPath, rawPath);
+						if (direct.startsWith(targetPath) && fs.existsSync(direct)) {
+							resolved = direct;
+						} else {
+							resolved = findFileByBaseName(targetPath, path.basename(rawPath));
+						}
+					}
+
+					let sourceLine = null;
+					if (resolved && fs.existsSync(resolved)) {
+						try {
+							const lines = fs.readFileSync(resolved, "utf-8").split(/\r?\n/);
+							sourceLine = line > 0 && line <= lines.length ? lines[line - 1] : null;
+						} catch {
+							// ignore
+						}
+					}
+					return {
+						rawPath,
+						file: resolved ? path.relative(targetPath, resolved).replace(/\\/g, "/") : null,
+						line,
+						column,
+						sourceLine
+					};
+				}
+				return null;
+			};
+
+			let browser = null;
+			try {
+				browser = await chromium.launch({ headless: true });
+				const page = await browser.newPage();
+
+				page.on("console", (msg) => {
+					const text = msg.text();
+					const type = msg.type();
+					const location = msg.location();
+					const item = {
+						type,
+						text,
+						url: location && location.url ? location.url : null,
+						lineNumber: location && typeof location.lineNumber === "number" ? location.lineNumber + 1 : null,
+						columnNumber: location && typeof location.columnNumber === "number" ? location.columnNumber + 1 : null
+					};
+					pushLimited(consoleLogs, item);
+					if (type === "error") {
+						pushLimited(errorLogs, item);
+					}
+				});
+
+				page.on("pageerror", (error) => {
+					const text = error && error.stack ? String(error.stack) : String(error);
+					pushLimited(pageErrors, { type: "pageerror", text });
+					pushLimited(errorLogs, { type: "pageerror", text });
+				});
+
+				let opened = false;
+				for (let i = 0; i < 20; i++) {
+					if (serveProcess.killed) break;
+					try {
+						await page.goto(serveUrl, { waitUntil: "domcontentloaded", timeout: 1500 });
+						opened = true;
+						break;
+					} catch {
+						await new Promise((resolve) => setTimeout(resolve, 500));
+					}
+				}
+
+				if (!opened) {
+					await cleanupServeProcess();
+					return {
+						content: [{
+							type: "text",
+							text: JSON.stringify({
+								status: "failed",
+								reason: `Failed to open ${serveUrl}`,
+								serveStdout: stdoutLogs,
+								serveStderr: stderrLogs
+							}, null, 2)
+						}],
+						isError: true
+					};
+				}
+
+				await new Promise((resolve) => setTimeout(resolve, runDurationMs));
 			} catch (error) {
 				const message = error && error.message ? error.message : "Unknown error";
-				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
 				return {
-					content: [{ type: "text", text: `Error during headless test: ${message}${stdout}${stderr}` }],
-					isError: true,
+					content: [{
+						type: "text",
+						text: `Error while serving or browser inspection: ${message}`
+					}],
+					isError: true
 				};
+			} finally {
+				try {
+					if (browser) await browser.close();
+				} catch {
+					// ignore
+				}
+				await cleanupServeProcess();
 			}
+
+			const mappedErrors = errorLogs.map((entry) => {
+				const mapping = mapErrorToSource(entry.text || "");
+				return {
+					type: entry.type,
+					message: entry.text || "",
+					file: mapping ? mapping.file : null,
+					line: mapping ? mapping.line : null,
+					column: mapping ? mapping.column : null,
+					sourceLine: mapping ? mapping.sourceLine : null
+				};
+			});
+			const hasErrors = mappedErrors.length > 0;
+			const result = {
+				status: hasErrors ? "error_detected" : "ok",
+				url: serveUrl,
+				durationMs: runDurationMs,
+				logSummary: {
+					consoleCount: consoleLogs.length,
+					errorCount: mappedErrors.length,
+					pageErrorCount: pageErrors.length
+				},
+				errors: mappedErrors,
+				consoleLogs,
+				serveStdout: stdoutLogs,
+				serveStderr: stderrLogs
+			};
+
+			return {
+				content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				isError: hasErrors
+			};
 		}
 	);
 
@@ -1403,7 +1554,6 @@ ${genreInfo}
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
-8. **デバッグ**：headless_akashic_test を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
 
 ## 実装上の注意
 * 必要なコメントを付けること。
