@@ -1458,8 +1458,15 @@ ${genreInfo}
   * [フレームアニメーション (パラパラアニメ) する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/frame-animation.html)
 * 画像の一部を表示する場合は、g.Spriteの srcWidth, srcHeight, srcX, srcY を利用すること。詳細は以下を参照：
   * [画像の一部分を表示する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/drawing/partial-image.html)
-* エンティティ(g.E を継承しているオブジェクト)をドラッグ・スワイプする場合は、g.E#onPointMove トリガーを利用すること。詳細は以下を参照：
-  * [ドラッグ・スワイプで動かす | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/operation/drag.html)
+* エンティティ(g.E を継承しているオブジェクト)をドラッグ・スワイプする場合は、g.E#onPointMove トリガーを利用すること。このトリガーに登録するハンドラの引数である PointMoveEvent の仕様は以下の通り
+  * PointMoveEvent#point: 最後にonPointDownが発生した座標。座標系の原点はエンティティの座標
+  * PointMoveEvent#startDelta: 最後にonPointDownが発生した座標から、現在のポイント座標までの移動量
+  * PointMoveEvent#prevDelta: 最後にonPointMoveが発生した座標から、現在のポイント座標までの移動量
+  * 詳細やコード例は以下を参照：
+    * [ドラッグ・スワイプで動かす | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/operation/drag.html)
+* g.E#onPointDown トリガーに登録するハンドラの引数である PointDownEvent の仕様は以下の通り
+  * PointDownEvent#point: 最後にonPointDownが発生した座標。座標系の原点はエンティティの座標
+  * PointDownEvent#startDelta: 最後にonPointDownが発生した座標から、現在のポイント座標までの移動量
 `
 						}
 					}
