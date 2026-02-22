@@ -9,7 +9,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "",
+  "author": "dera-",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",
