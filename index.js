@@ -1464,9 +1464,11 @@ ${genreInfo}
   * PointMoveEvent#prevDelta: 最後にonPointMoveが発生した座標から、現在のポイント座標までの移動量
   * 詳細やコード例は以下を参照：
     * [ドラッグ・スワイプで動かす | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/operation/drag.html)
+* g.E#onPointUp トリガーに登録するハンドラの引数である PointUpEvent の仕様は以下の通り
+  * PointUpEvent#point: 最後にonPointDownが発生した座標。座標系の原点はエンティティの座標
+  * PointUpEvent#startDelta: 最後にonPointDownが発生した座標から、現在のポイント座標までの移動量
 * g.E#onPointDown トリガーに登録するハンドラの引数である PointDownEvent の仕様は以下の通り
-  * PointDownEvent#point: 最後にonPointDownが発生した座標。座標系の原点はエンティティの座標
-  * PointDownEvent#startDelta: 最後にonPointDownが発生した座標から、現在のポイント座標までの移動量
+  * PointDownEvent#point: onPointDownが発生した座標。座標系の原点はエンティティの座標
 `
 						}
 					}
