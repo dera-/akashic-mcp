@@ -6,11 +6,86 @@ import { z } from "zod";
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import net from 'net';
 import { exec, spawn } from 'child_process';
 import util from 'util';
 
 // execをPromise化して非同期処理しやすくする
 const execAsync = util.promisify(exec);
+let cachedChromium = null;
+let playwrightInstallPromise = null;
+let playwrightReady = false;
+
+async function ensurePlaywrightChromiumInstalled() {
+	if (playwrightReady && cachedChromium) {
+		return { ok: true, chromium: cachedChromium };
+	}
+	if (playwrightInstallPromise) {
+		return playwrightInstallPromise;
+	}
+
+	playwrightInstallPromise = (async () => {
+		let playwright = null;
+		try {
+			playwright = await import("playwright");
+		} catch {
+			return {
+				ok: false,
+				message: "Missing dependency: 'playwright'. Install it with: npm install playwright"
+			};
+		}
+
+		const chromium = playwright.chromium;
+		const executablePath = chromium.executablePath();
+		if (executablePath && fs.existsSync(executablePath)) {
+			cachedChromium = chromium;
+			playwrightReady = true;
+			return { ok: true, chromium };
+		}
+
+		try {
+			console.error("[Info] Playwright Chromium not found. Running: npx playwright install chromium");
+			await execAsync("npx playwright install chromium");
+		} catch (error) {
+			const message = error && error.message ? error.message : "Unknown error";
+			const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
+			return {
+				ok: false,
+				message: `Failed to install Playwright Chromium: ${message}${stderr}`
+			};
+		}
+
+		const installedPath = chromium.executablePath();
+		if (installedPath && fs.existsSync(installedPath)) {
+			cachedChromium = chromium;
+			playwrightReady = true;
+			console.error("[Info] Playwright Chromium is ready.");
+			return { ok: true, chromium };
+		}
+
+		return {
+			ok: false,
+			message: "Playwright Chromium install finished but executable was not found."
+		};
+	})().finally(() => {
+		playwrightInstallPromise = null;
+	});
+
+	return playwrightInstallPromise;
+}
+
+function warmupPlaywrightChromiumInBackground() {
+	if (process.env.AKASHIC_AUTO_INSTALL_PLAYWRIGHT === "0") {
+		console.error("[Info] Skipped Playwright auto-install (AKASHIC_AUTO_INSTALL_PLAYWRIGHT=0).");
+		return;
+	}
+	// Fire-and-forget warmup; akashic_serve waits on the same promise if still running.
+	void ensurePlaywrightChromiumInstalled().then((result) => {
+		if (!result.ok) {
+			console.error(`[Warning] Playwright warmup failed: ${result.message}`);
+		}
+	});
+}
 
 // =================================================================
 // 1. 事前準備: ドキュメントデータの読み込み
@@ -773,30 +848,24 @@ async function createMcpServer() {
 			}
 
 			const runDurationMs = typeof durationMs === "number" ? durationMs : 10000;
-			const servePort = typeof port === "number" ? port : 3300;
+			const servePort = typeof port === "number" ? port : 25252; // Math.round(10000 * Math.random()) + 20000
 			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
 			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
 
-			const localAkashicBin = path.resolve(targetPath, "node_modules", ".bin", "akashic");
-			const useLocalBin = fs.existsSync(localAkashicBin);
-			const command = useLocalBin ? localAkashicBin : "npx";
-			const args = useLocalBin
-				? ["serve", "--host", "127.0.0.1", "--port", String(servePort)]
-				: ["akashic", "serve", "--host", "127.0.0.1", "--port", String(servePort)];
+			const command = "akashic";
+			const args = ["serve", "--port", String(servePort), "-B"];
 
-			let chromium = null;
-			try {
-				const playwright = await import("playwright");
-				chromium = playwright.chromium;
-			} catch {
+			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
+			if (!playwrightSetup.ok) {
 				return {
 					content: [{
 						type: "text",
-						text: "Error: 'playwright' is required for akashic_serve. Install it in this MCP server project (npm install playwright)."
+						text: `Error: ${playwrightSetup.message}`
 					}],
 					isError: true
 				};
 			}
+			const chromium = playwrightSetup.chromium;
 
 			const stdoutLogs = [];
 			const stderrLogs = [];
@@ -813,24 +882,88 @@ async function createMcpServer() {
 				cwd: targetPath,
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
-				shell: false
+				shell: false,
+				detached: true
 			});
 
-			const cleanupServeProcess = async () => {
-				if (serveProcess.killed) return;
-				try {
-					serveProcess.kill("SIGTERM");
-				} catch {
-					// ignore
-				}
-				await new Promise((resolve) => setTimeout(resolve, 500));
-				if (!serveProcess.killed) {
+			const waitForPortClose = (portNumber, timeoutMs) => new Promise((resolve) => {
+				const start = Date.now();
+				const check = () => {
+					const socket = new net.Socket();
+					let settled = false;
+					const done = (isClosed) => {
+						if (settled) return;
+						settled = true;
+						try {
+							socket.destroy();
+						} catch {
+							// ignore
+						}
+						resolve(isClosed);
+					};
+					socket.setTimeout(400);
+					socket.once("connect", () => {
+						const elapsed = Date.now() - start;
+						if (elapsed >= timeoutMs) {
+							done(false);
+							return;
+						}
+						setTimeout(check, 150);
+					});
+					socket.once("timeout", () => done(true));
+					socket.once("error", () => done(true));
 					try {
-						serveProcess.kill("SIGKILL");
+						socket.connect(portNumber, "127.0.0.1");
 					} catch {
-						// ignore
+						done(true);
 					}
+				};
+				check();
+			});
+
+			const waitForServeProcessExit = (timeoutMs) => new Promise((resolve) => {
+				if (serveProcess.exitCode !== null) {
+					resolve();
+					return;
 				}
+				let settled = false;
+				const done = () => {
+					if (settled) return;
+					settled = true;
+					resolve();
+				};
+				serveProcess.once("close", done);
+				setTimeout(done, timeoutMs);
+			});
+
+			const killServeProcessGroup = (signal) => {
+				try {
+					if (typeof serveProcess.pid === "number" && serveProcess.pid > 0) {
+						// Kill the entire process group created by detached spawn.
+						process.kill(-serveProcess.pid, signal);
+						return true;
+					}
+				} catch {
+					// ignore and fallback
+				}
+				try {
+					serveProcess.kill(signal);
+					return true;
+				} catch {
+					return false;
+				}
+			};
+
+			const cleanupServeProcess = async () => {
+				killServeProcessGroup("SIGTERM");
+				await waitForServeProcessExit(1000);
+				let portClosed = await waitForPortClose(servePort, 2000);
+				if (serveProcess.exitCode === null || !portClosed) {
+					killServeProcessGroup("SIGKILL");
+					await waitForServeProcessExit(1000);
+					portClosed = await waitForPortClose(servePort, 2500);
+				}
+				return portClosed;
 			};
 
 			serveProcess.stdout.on("data", (chunk) => {
@@ -922,6 +1055,7 @@ async function createMcpServer() {
 
 			let browser = null;
 			try {
+				// akashic_serve always runs Playwright in headless mode.
 				browser = await chromium.launch({ headless: true });
 				const page = await browser.newPage();
 
@@ -992,7 +1126,10 @@ async function createMcpServer() {
 				} catch {
 					// ignore
 				}
-				await cleanupServeProcess();
+				const portClosed = await cleanupServeProcess();
+				if (!portClosed) {
+					pushLimited(stderrLogs, `Warning: akashic serve may still be alive on port ${servePort} after cleanup.`);
+				}
 			}
 
 			const mappedErrors = errorLogs.map((entry) => {
@@ -1555,6 +1692,7 @@ ${apiSummaryIndexForPrompt}
    * ランキングゲームの場合は、[ランキングゲーム | Akashic Engine](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。
    * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
+   * 明示的に必要と言われない限り game.json を変更しない。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
 8. **デバッグ**：akashic_serve を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
@@ -1710,6 +1848,8 @@ function sendJson(res, statusCode, payload) {
 }
 
 async function main() {
+	warmupPlaywrightChromiumInBackground();
+
 	const port = Number(process.env.PORT || 8080);
 	const basePath = "/mcp";
 	const ssePath = `${basePath}/sse`;
