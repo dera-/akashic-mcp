@@ -855,8 +855,8 @@ async function createMcpServer() {
 			const useLocalBin = fs.existsSync(localAkashicBin);
 			const command = useLocalBin ? localAkashicBin : "npx";
 			const args = useLocalBin
-				? ["serve", "--host", "127.0.0.1", "--port", String(servePort)]
-				: ["akashic", "serve", "--host", "127.0.0.1", "--port", String(servePort)];
+				? ["serve", "--port", String(servePort)]
+				: ["akashic", "serve", "--port", String(servePort)];
 
 			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
 			if (!playwrightSetup.ok) {
@@ -1627,6 +1627,7 @@ ${apiSummaryIndexForPrompt}
    * ランキングゲームの場合は、[ランキングゲーム | Akashic Engine](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。
    * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
+   * 明示的に必要と言われない限り game.json を変更しない。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
 8. **デバッグ**：akashic_serve を用いてゲームの動作検証をする。問題がある場合は該当箇所を修正する。
