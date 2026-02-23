@@ -11,6 +11,80 @@ import util from 'util';
 
 // execをPromise化して非同期処理しやすくする
 const execAsync = util.promisify(exec);
+let cachedChromium = null;
+let playwrightInstallPromise = null;
+let playwrightReady = false;
+
+async function ensurePlaywrightChromiumInstalled() {
+	if (playwrightReady && cachedChromium) {
+		return { ok: true, chromium: cachedChromium };
+	}
+	if (playwrightInstallPromise) {
+		return playwrightInstallPromise;
+	}
+
+	playwrightInstallPromise = (async () => {
+		let playwright = null;
+		try {
+			playwright = await import("playwright");
+		} catch {
+			return {
+				ok: false,
+				message: "Missing dependency: 'playwright'. Install it with: npm install playwright"
+			};
+		}
+
+		const chromium = playwright.chromium;
+		const executablePath = chromium.executablePath();
+		if (executablePath && fs.existsSync(executablePath)) {
+			cachedChromium = chromium;
+			playwrightReady = true;
+			return { ok: true, chromium };
+		}
+
+		try {
+			console.error("[Info] Playwright Chromium not found. Running: npx playwright install chromium");
+			await execAsync("npx playwright install chromium");
+		} catch (error) {
+			const message = error && error.message ? error.message : "Unknown error";
+			const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
+			return {
+				ok: false,
+				message: `Failed to install Playwright Chromium: ${message}${stderr}`
+			};
+		}
+
+		const installedPath = chromium.executablePath();
+		if (installedPath && fs.existsSync(installedPath)) {
+			cachedChromium = chromium;
+			playwrightReady = true;
+			console.error("[Info] Playwright Chromium is ready.");
+			return { ok: true, chromium };
+		}
+
+		return {
+			ok: false,
+			message: "Playwright Chromium install finished but executable was not found."
+		};
+	})().finally(() => {
+		playwrightInstallPromise = null;
+	});
+
+	return playwrightInstallPromise;
+}
+
+function warmupPlaywrightChromiumInBackground() {
+	if (process.env.AKASHIC_AUTO_INSTALL_PLAYWRIGHT === "0") {
+		console.error("[Info] Skipped Playwright auto-install (AKASHIC_AUTO_INSTALL_PLAYWRIGHT=0).");
+		return;
+	}
+	// Fire-and-forget warmup; akashic_serve waits on the same promise if still running.
+	void ensurePlaywrightChromiumInstalled().then((result) => {
+		if (!result.ok) {
+			console.error(`[Warning] Playwright warmup failed: ${result.message}`);
+		}
+	});
+}
 
 // =================================================================
 // 1. 事前準備: ドキュメントデータの読み込み
@@ -784,19 +858,17 @@ async function createMcpServer() {
 				? ["serve", "--host", "127.0.0.1", "--port", String(servePort)]
 				: ["akashic", "serve", "--host", "127.0.0.1", "--port", String(servePort)];
 
-			let chromium = null;
-			try {
-				const playwright = await import("playwright");
-				chromium = playwright.chromium;
-			} catch {
+			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
+			if (!playwrightSetup.ok) {
 				return {
 					content: [{
 						type: "text",
-						text: "Error: 'playwright' is required for akashic_serve. Install it in this MCP server project (npm install playwright)."
+						text: `Error: ${playwrightSetup.message}`
 					}],
 					isError: true
 				};
 			}
+			const chromium = playwrightSetup.chromium;
 
 			const stdoutLogs = [];
 			const stderrLogs = [];
@@ -1710,6 +1782,8 @@ function sendJson(res, statusCode, payload) {
 }
 
 async function main() {
+	warmupPlaywrightChromiumInBackground();
+
 	const port = Number(process.env.PORT || 8080);
 	const basePath = "/mcp";
 	const ssePath = `${basePath}/sse`;
