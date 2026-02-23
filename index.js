@@ -15,20 +15,63 @@ const execAsync = util.promisify(exec);
 // =================================================================
 // 1. 事前準備: ドキュメントデータの読み込み
 // =================================================================
-let docsData = [];
-try {
-	// data/akashic_docs.json を探す
-	const docsPath = path.resolve('./data/akashic_docs.json');
-	if (fs.existsSync(docsPath)) {
-		docsData = JSON.parse(fs.readFileSync(docsPath, 'utf-8'));
-		console.error(`[Info] Loaded ${docsData.length} documents from akashic_docs.json`);
-	} else {
-		console.error("[Warning] akashic_docs.json not found. 'search_akashic_docs' tool will return empty results.");
-		console.error("Run 'node scripts/fetch-docs.js' first.");
+function getDocsData(docsPath, label) {
+	let docsData = [];
+	try {
+		if (fs.existsSync(docsPath)) {
+			const parsed = JSON.parse(fs.readFileSync(docsPath, 'utf-8'));
+			if (Array.isArray(parsed)) {
+				docsData = parsed;
+			}
+			console.log(`[Info] Loaded ${docsData.length} documents from ${label}`);
+		} else {
+			console.error(`[Warning] ${label} not found. Related docs will be empty.`);
+		}
+	} catch (error) {
+		console.error("[Error] Failed to load docs:", error.message);
 	}
-} catch (error) {
-	console.error("[Error] Failed to load docs:", error.message);
+	return docsData;
 }
+const docsData = getDocsData(path.resolve('./data/akashic_docs.json'), "akashic_docs.json");
+const apiData = getDocsData(path.resolve('./data/akashic-engine.json'), "akashic-engine.json");
+
+function normalizeDocItem(item, sourceName) {
+	const title = typeof item?.title === "string" ? item.title.trim() : "";
+	const url = typeof item?.url === "string" ? item.url.trim() : "";
+	const content = typeof item?.content === "string" ? item.content : "";
+	if (!title && !url && !content) return null;
+	return { source: sourceName, title, url, content };
+}
+
+const allDocsData = [
+	...docsData.map((item) => normalizeDocItem(item, "official-docs")),
+	...apiData.map((item) => normalizeDocItem(item, "akashic-engine-repo")),
+].filter(Boolean);
+
+function buildApiSummaryIndex(data, maxItems = 60) {
+	const seen = new Set();
+	const lines = [];
+	for (const doc of data) {
+		if (!doc || (!doc.title && !doc.url)) continue;
+		const key = `${doc.title}::${doc.url}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const title = doc.title || "(no title)";
+		const line = `- [${doc.source}] ${title}${doc.url ? ` | ${doc.url}` : ""}`;
+		lines.push(line);
+		if (lines.length >= maxItems) break;
+	}
+	return [
+		"## 事前ロード済み API 要約インデックス",
+		"* 詳細本文は必要なときだけ search_akashic_docs で取得すること",
+		...lines
+	].join("\n");
+}
+
+const apiSummaryIndexForPrompt = buildApiSummaryIndex([
+	...apiData.map((item) => normalizeDocItem(item, "akashic-engine-repo")),
+].filter(Boolean));
+
 
 // =================================================================
 // 2. ヘルパー関数: 利用可能なテンプレート一覧の取得
@@ -92,23 +135,48 @@ async function createMcpServer() {
 	// ---------------------------------------------------------------
 	server.tool(
 		"search_akashic_docs",
-		"Search for information about Akashic Engine API, tutorials, and game design tips.",
+		"Search and fetch detailed information from preloaded Akashic docs/repo references.",
 		{
 			query: z.string().describe("Search keyword (e.g. 'click event', 'g.Sprite', 'audio')."),
+			maxResults: z.number().int().min(1).max(10).optional().describe("Maximum number of hits (default: 3)."),
 		},
-		async ({ query }) => {
+		async ({ query, maxResults }) => {
 			const q = query.toLowerCase();
+			const limit = typeof maxResults === "number" ? maxResults : 3;
 			// タイトルまたは本文にキーワードが含まれるものを検索
-			const results = docsData
-				.filter(doc => 
+			const results = allDocsData
+				.filter((doc) =>
 					(doc.title && doc.title.toLowerCase().includes(q)) || 
 					(doc.content && doc.content.toLowerCase().includes(q))
 				)
-				.slice(0, 3) // コンテキストサイズ節約のため上位3件に制限
-				.map(doc => `Title: ${doc.title}\nURL: ${doc.url}\n\n${doc.content.substring(0, 500)}...`);
+				.slice(0, limit)
+				.map((doc) => {
+					const excerpt = doc.content ? doc.content.substring(0, 700) : "";
+					return [
+						`Source: ${doc.source}`,
+						`Title: ${doc.title || "(no title)"}`,
+						`URL: ${doc.url || "(no url)"}`,
+						"",
+						excerpt ? `${excerpt}...` : "(no content)"
+					].join("\n");
+				});
 
 			return {
 				content: [{ type: "text", text: results.join("\n\n---\n\n") || "No relevant documents found." }]
+			};
+		}
+	);
+
+	// ---------------------------------------------------------------
+	// Tool 1.1: API要約インデックス取得 (get_api_summary_index)
+	// ---------------------------------------------------------------
+	server.tool(
+		"get_api_summary_index",
+		"Get the preloaded lightweight API summary index. Use this first, then fetch details with search_akashic_docs.",
+		{},
+		async () => {
+			return {
+				content: [{ type: "text", text: apiSummaryIndexForPrompt }]
 			};
 		}
 	);
@@ -962,72 +1030,6 @@ async function createMcpServer() {
 	);
 
 	// ---------------------------------------------------------------
-		// Tool 9: ESLint format (format_with_eslint)
-	// ---------------------------------------------------------------
-	server.tool(
-		"format_with_eslint",
-		"Format game source code using @akashic/eslint-config.",
-		{
-			directoryName: z.string().describe("Project directory path (relative or absolute)."),
-			targetGlob: z.string().optional().describe("Glob for files to format (default: 'script/**/*.js').")
-		},
-		async ({ directoryName, targetGlob }) => {
-			if (!path.isAbsolute(directoryName) && directoryName.includes("..")) {
-				return { content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }], isError: true };
-			}
-
-			const targetPath = path.isAbsolute(directoryName)
-				? path.normalize(directoryName)
-				: path.resolve(process.cwd(), directoryName);
-
-			if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
-				return { content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }], isError: true };
-			}
-
-			const eslintConfigModule = path.resolve(targetPath, "node_modules", "@akashic", "eslint-config");
-			const eslintBin = path.resolve(targetPath, "node_modules", ".bin", "eslint");
-			if (!fs.existsSync(eslintConfigModule) || !fs.existsSync(eslintBin)) {
-				return { content: [{ type: "text", text: "Error: eslint or @akashic/eslint-config is not installed in the project." }], isError: true };
-			}
-
-			try {
-				const configPath = path.resolve(targetPath, ".mcp-eslint.config.cjs");
-				const configCode = [
-					"const eslintConfig = require(\"@akashic/eslint-config\");",
-					"",
-					"module.exports = [",
-					"\t...eslintConfig,",
-					"\t{",
-					"\t\tfiles: [\"**/*.{js,mjs,cjs,ts}\"],",
-					"\t\tlanguageOptions: {",
-					"\t\t\tsourceType: \"module\"",
-					"\t\t}",
-					"\t}",
-					"];",
-					""
-				].join("\n");
-
-				fs.writeFileSync(configPath, configCode);
-				const glob = targetGlob && targetGlob.trim() ? targetGlob : "script/**/*.js";
-				const command = `cd "${targetPath}" && "${eslintBin}" --config "${configPath}" --fix ${glob}`;
-				const { stdout, stderr } = await execAsync(command);
-				const output = [stdout, stderr].filter(Boolean).join("\n");
-				return {
-					content: [{ type: "text", text: output || "ESLint formatting completed." }]
-				};
-			} catch (error) {
-				const message = error && error.message ? error.message : "Unknown error";
-				const stdout = error && error.stdout ? `\nStdout: ${error.stdout}` : "";
-				const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
-				return {
-					content: [{ type: "text", text: `Error during ESLint formatting: ${message}${stdout}${stderr}` }],
-					isError: true,
-				};
-			}
-		}
-	);
-
-	// ---------------------------------------------------------------
 	// Tool 10: JS syntax check (check_js_syntax)
 	// ---------------------------------------------------------------
 	server.tool(
@@ -1513,6 +1515,8 @@ ${genreInfo}
 							text: `あなたは**ニコ生ゲーム**の実装担当者です。以下のガイドラインに従ってください。
 ${genreInfo}
 
+${apiSummaryIndexForPrompt}
+
 ## 開発ガイドライン
 1. **まず調査**：実装に必要な最新の API 仕様（例：音声再生、当たり判定、乱数など）と、ニコ生ゲーム側の要件を確認するために、search_akashic_docs を使用すること。
 2. **出力ディレクトリ固定**：生成物は必ずこの固定パスに出力すること：${targetDir}
@@ -1550,7 +1554,6 @@ ${genreInfo}
      * [読み込んだアセットを取得する | Akashic Engine](https://akashic-games.github.io/reverse-reference/v3/asset/get-asset.html )
    * ランキングゲームの場合は、[ランキングゲーム | Akashic Engine](https://akashic-games.github.io/shin-ichiba/ranking/）の要件に従う。
    * 変更した JavaScript ファイルに関しては check_js_syntax で構文エラーがないか確認すること。エラーが見つかった場合は修正すること。
-   * format_with_eslint は大きな変更のときだけ実行し、小さな差分なら省略する。
    * API や要件の確認が必要なら適宜 search_akashic_docs を使う。
 6. **game.json の更新**：アセット(画像・音声・スクリプト・テキスト)の新規追加・削除時のみ(画像や音声の場合は変更時も含む)、 akashic_scan_asset を使う。
 7. **ゲームプロジェクトの静的検証**：validate_niconama_spec を用いて、ゲームプロジェクトがニコ生ゲームの要件を満たしているか検証する。問題がある場合は該当箇所を修正する。
