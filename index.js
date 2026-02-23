@@ -6,6 +6,7 @@ import { z } from "zod";
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import net from 'net';
 import { exec, spawn } from 'child_process';
 import util from 'util';
 
@@ -847,16 +848,12 @@ async function createMcpServer() {
 			}
 
 			const runDurationMs = typeof durationMs === "number" ? durationMs : 10000;
-			const servePort = typeof port === "number" ? port : 3300;
+			const servePort = typeof port === "number" ? port : 25252; // Math.round(10000 * Math.random()) + 20000
 			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
 			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
 
-			const localAkashicBin = path.resolve(targetPath, "node_modules", ".bin", "akashic");
-			const useLocalBin = fs.existsSync(localAkashicBin);
-			const command = useLocalBin ? localAkashicBin : "npx";
-			const args = useLocalBin
-				? ["serve", "--port", String(servePort), "-B"]
-				: ["akashic", "serve", "--port", String(servePort), "-B"];
+			const command = "akashic";
+			const args = ["serve", "--port", String(servePort), "-B"];
 
 			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
 			if (!playwrightSetup.ok) {
@@ -885,7 +882,43 @@ async function createMcpServer() {
 				cwd: targetPath,
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
-				shell: false
+				shell: false,
+				detached: true
+			});
+
+			const waitForPortClose = (portNumber, timeoutMs) => new Promise((resolve) => {
+				const start = Date.now();
+				const check = () => {
+					const socket = new net.Socket();
+					let settled = false;
+					const done = (isClosed) => {
+						if (settled) return;
+						settled = true;
+						try {
+							socket.destroy();
+						} catch {
+							// ignore
+						}
+						resolve(isClosed);
+					};
+					socket.setTimeout(400);
+					socket.once("connect", () => {
+						const elapsed = Date.now() - start;
+						if (elapsed >= timeoutMs) {
+							done(false);
+							return;
+						}
+						setTimeout(check, 150);
+					});
+					socket.once("timeout", () => done(true));
+					socket.once("error", () => done(true));
+					try {
+						socket.connect(portNumber, "127.0.0.1");
+					} catch {
+						done(true);
+					}
+				};
+				check();
 			});
 
 			const waitForServeProcessExit = (timeoutMs) => new Promise((resolve) => {
@@ -903,22 +936,34 @@ async function createMcpServer() {
 				setTimeout(done, timeoutMs);
 			});
 
-			const cleanupServeProcess = async () => {
-				if (serveProcess.exitCode !== null) return;
+			const killServeProcessGroup = (signal) => {
 				try {
-					serveProcess.kill("SIGTERM");
-				} catch {
-					// ignore
-				}
-				await waitForServeProcessExit(1000);
-				if (serveProcess.exitCode === null) {
-					try {
-						serveProcess.kill("SIGKILL");
-					} catch {
-						// ignore
+					if (typeof serveProcess.pid === "number" && serveProcess.pid > 0) {
+						// Kill the entire process group created by detached spawn.
+						process.kill(-serveProcess.pid, signal);
+						return true;
 					}
-					await waitForServeProcessExit(1000);
+				} catch {
+					// ignore and fallback
 				}
+				try {
+					serveProcess.kill(signal);
+					return true;
+				} catch {
+					return false;
+				}
+			};
+
+			const cleanupServeProcess = async () => {
+				killServeProcessGroup("SIGTERM");
+				await waitForServeProcessExit(1000);
+				let portClosed = await waitForPortClose(servePort, 2000);
+				if (serveProcess.exitCode === null || !portClosed) {
+					killServeProcessGroup("SIGKILL");
+					await waitForServeProcessExit(1000);
+					portClosed = await waitForPortClose(servePort, 2500);
+				}
+				return portClosed;
 			};
 
 			serveProcess.stdout.on("data", (chunk) => {
@@ -1081,7 +1126,10 @@ async function createMcpServer() {
 				} catch {
 					// ignore
 				}
-				await cleanupServeProcess();
+				const portClosed = await cleanupServeProcess();
+				if (!portClosed) {
+					pushLimited(stderrLogs, `Warning: akashic serve may still be alive on port ${servePort} after cleanup.`);
+				}
 			}
 
 			const mappedErrors = errorLogs.map((entry) => {
