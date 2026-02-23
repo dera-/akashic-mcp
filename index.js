@@ -855,8 +855,8 @@ async function createMcpServer() {
 			const useLocalBin = fs.existsSync(localAkashicBin);
 			const command = useLocalBin ? localAkashicBin : "npx";
 			const args = useLocalBin
-				? ["serve", "--port", String(servePort)]
-				: ["akashic", "serve", "--port", String(servePort)];
+				? ["serve", "--port", String(servePort), "-B"]
+				: ["akashic", "serve", "--port", String(servePort), "-B"];
 
 			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
 			if (!playwrightSetup.ok) {
@@ -888,20 +888,36 @@ async function createMcpServer() {
 				shell: false
 			});
 
+			const waitForServeProcessExit = (timeoutMs) => new Promise((resolve) => {
+				if (serveProcess.exitCode !== null) {
+					resolve();
+					return;
+				}
+				let settled = false;
+				const done = () => {
+					if (settled) return;
+					settled = true;
+					resolve();
+				};
+				serveProcess.once("close", done);
+				setTimeout(done, timeoutMs);
+			});
+
 			const cleanupServeProcess = async () => {
-				if (serveProcess.killed) return;
+				if (serveProcess.exitCode !== null) return;
 				try {
 					serveProcess.kill("SIGTERM");
 				} catch {
 					// ignore
 				}
-				await new Promise((resolve) => setTimeout(resolve, 500));
-				if (!serveProcess.killed) {
+				await waitForServeProcessExit(1000);
+				if (serveProcess.exitCode === null) {
 					try {
 						serveProcess.kill("SIGKILL");
 					} catch {
 						// ignore
 					}
+					await waitForServeProcessExit(1000);
 				}
 			};
 
@@ -994,6 +1010,7 @@ async function createMcpServer() {
 
 			let browser = null;
 			try {
+				// akashic_serve always runs Playwright in headless mode.
 				browser = await chromium.launch({ headless: true });
 				const page = await browser.newPage();
 
