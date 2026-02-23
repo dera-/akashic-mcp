@@ -852,8 +852,8 @@ async function createMcpServer() {
 			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
 			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
 
-			const command = "akashic";
-			const args = ["serve", "--port", String(servePort), "-B"];
+			const command = "npx";
+			const args = ["akashic", "serve", "--port", String(servePort), "-B"];
 
 			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
 			if (!playwrightSetup.ok) {
