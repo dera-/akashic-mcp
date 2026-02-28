@@ -109,6 +109,9 @@ function getDocsData(docsPath, label) {
 }
 const docsData = getDocsData(path.resolve('./data/akashic_docs.json'), "akashic_docs.json");
 const apiData = getDocsData(path.resolve('./data/akashic-engine.json'), "akashic-engine.json");
+const cliData = getDocsData(path.resolve('./data/akashic-cli.json'), "akashic-cli.json");
+const agvwData = getDocsData(path.resolve('./data/agvw.json'), "agvw.json");
+const coeData = getDocsData(path.resolve('./data/coe.json'), "coe.json");
 
 function normalizeDocItem(item, sourceName) {
 	const title = typeof item?.title === "string" ? item.title.trim() : "";
@@ -121,6 +124,9 @@ function normalizeDocItem(item, sourceName) {
 const allDocsData = [
 	...docsData.map((item) => normalizeDocItem(item, "official-docs")),
 	...apiData.map((item) => normalizeDocItem(item, "akashic-engine-repo")),
+	...cliData.map((item) => normalizeDocItem(item, "akashic-cli-repo")),
+	...agvwData.map((item) => normalizeDocItem(item, "agvw-repo")),
+	...coeData.map((item) => normalizeDocItem(item, "coe-repo")),
 ].filter(Boolean);
 
 function buildApiSummaryIndex(data, maxItems = 60) {
