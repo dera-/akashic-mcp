@@ -12,9 +12,36 @@ import util from 'util';
 
 // execをPromise化して非同期処理しやすくする
 const execAsync = util.promisify(exec);
+const isWindows = process.platform === "win32";
 let cachedChromium = null;
 let playwrightInstallPromise = null;
 let playwrightReady = false;
+
+function getNpxCommand() {
+	return process.env.NPX_BINARY ?? (isWindows ? "npx.cmd" : "npx");
+}
+
+function buildSpawnOptions(baseOptions = {}) {
+	return {
+		...baseOptions,
+		shell: isWindows
+	};
+}
+
+function runTaskkill(pid) {
+	return new Promise((resolve) => {
+		if (!isWindows || typeof pid !== "number" || pid <= 0) {
+			resolve(false);
+			return;
+		}
+		const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+			stdio: "ignore",
+			windowsHide: true
+		});
+		killer.once("error", () => resolve(false));
+		killer.once("exit", (code) => resolve(code === 0));
+	});
+}
 
 async function ensurePlaywrightChromiumInstalled() {
 	if (playwrightReady && cachedChromium) {
@@ -44,8 +71,9 @@ async function ensurePlaywrightChromiumInstalled() {
 		}
 
 		try {
-			console.error("[Info] Playwright Chromium not found. Running: npx playwright install chromium");
-			await execAsync("npx playwright install chromium");
+			const npxCommand = getNpxCommand();
+			console.error(`[Info] Playwright Chromium not found. Running: ${npxCommand} playwright install chromium`);
+			await execAsync(`"${npxCommand}" playwright install chromium`);
 		} catch (error) {
 			const message = error && error.message ? error.message : "Unknown error";
 			const stderr = error && error.stderr ? `\nStderr: ${error.stderr}` : "";
@@ -852,7 +880,7 @@ async function createMcpServer() {
 			const openPath = entryPath && entryPath.trim() ? entryPath.trim() : "/";
 			const serveUrl = `http://127.0.0.1:${servePort}${openPath.startsWith("/") ? openPath : `/${openPath}`}`;
 
-			const command = "npx";
+			const command = getNpxCommand();
 			const args = ["akashic", "serve", "--port", String(servePort), "-B"];
 
 			const playwrightSetup = await ensurePlaywrightChromiumInstalled();
@@ -882,8 +910,9 @@ async function createMcpServer() {
 				cwd: targetPath,
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
-				shell: false,
-				detached: true
+				detached: !isWindows,
+				windowsHide: true,
+				...buildSpawnOptions()
 			});
 
 			const waitForPortClose = (portNumber, timeoutMs) => new Promise((resolve) => {
@@ -937,6 +966,9 @@ async function createMcpServer() {
 			});
 
 			const killServeProcessGroup = (signal) => {
+				if (isWindows) {
+					return false;
+				}
 				try {
 					if (typeof serveProcess.pid === "number" && serveProcess.pid > 0) {
 						// Kill the entire process group created by detached spawn.
@@ -955,11 +987,19 @@ async function createMcpServer() {
 			};
 
 			const cleanupServeProcess = async () => {
-				killServeProcessGroup("SIGTERM");
+				if (isWindows) {
+					await runTaskkill(serveProcess.pid);
+				} else {
+					killServeProcessGroup("SIGTERM");
+				}
 				await waitForServeProcessExit(1000);
 				let portClosed = await waitForPortClose(servePort, 2000);
 				if (serveProcess.exitCode === null || !portClosed) {
-					killServeProcessGroup("SIGKILL");
+					if (isWindows) {
+						await runTaskkill(serveProcess.pid);
+					} else {
+						killServeProcessGroup("SIGKILL");
+					}
 					await waitForServeProcessExit(1000);
 					portClosed = await waitForPortClose(servePort, 2500);
 				}
