@@ -291,12 +291,19 @@ async function createMcpServer() {
 		"create_game_file",
 		"Create or overwrite a source file for the game (e.g., src/main.ts, game.json).",
 		{
-			filePath: z.string().describe("Relative or absolute path to the file (e.g., 'src/main.ts' or '/tmp/game/main.js')."),
+			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			filePath: z.string().describe("File path inside the project directory (e.g., 'script/main.js' or 'game.json')."),
 			code: z.string().describe("The full content of the file."),
 			forbidGameJsonUpdate: z.boolean().optional().describe("When true, prevents writing to game.json."),
 		},
-		async ({ filePath, code, forbidGameJsonUpdate }) => {
-			// セキュリティ: 親ディレクトリへの遡りを禁止
+		async ({ directoryName, filePath, code, forbidGameJsonUpdate }) => {
+			if (!path.isAbsolute(directoryName) && directoryName.includes('..')) {
+				return {
+					content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }],
+					isError: true
+				};
+			}
+
 			if (!path.isAbsolute(filePath) && filePath.includes('..')) {
 				return { 
 					content: [{ type: "text", text: "Error: Invalid file path. Avoid '..' in relative paths." }], 
@@ -305,10 +312,41 @@ async function createMcpServer() {
 			}
 
 			try {
+				const targetPath = path.isAbsolute(directoryName)
+					? path.normalize(directoryName)
+					: path.resolve(process.cwd(), directoryName);
+				if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+					return {
+						content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }],
+						isError: true
+					};
+				}
+
 				const fullPath = path.isAbsolute(filePath)
 					? path.normalize(filePath)
-					: path.resolve(process.cwd(), filePath);
-				if (forbidGameJsonUpdate && path.basename(fullPath).toLowerCase() === "game.json") {
+					: path.resolve(targetPath, filePath);
+				if (!fullPath.startsWith(targetPath + path.sep) && fullPath !== targetPath) {
+					return {
+						content: [{ type: "text", text: "Error: filePath must be inside the project directory." }],
+						isError: true
+					};
+				}
+
+				const relativePath = path.relative(targetPath, fullPath).replace(/\\/g, "/");
+				if (!relativePath || relativePath.startsWith("..")) {
+					return {
+						content: [{ type: "text", text: "Error: filePath must be inside the project directory." }],
+						isError: true
+					};
+				}
+
+				if (path.basename(fullPath).toLowerCase() === "game.json" && relativePath !== "game.json") {
+					return {
+						content: [{ type: "text", text: "Error: game.json must exist directly under the project directory." }],
+						isError: true,
+					};
+				}
+				if (forbidGameJsonUpdate && relativePath.toLowerCase() === "game.json") {
 					return {
 						content: [{ type: "text", text: "Error: game.json updates are forbidden by option." }],
 						isError: true,
@@ -322,7 +360,7 @@ async function createMcpServer() {
 				
 				fs.writeFileSync(fullPath, code);
 				return {
-					content: [{ type: "text", text: `Successfully wrote file to: ${filePath}` }]
+					content: [{ type: "text", text: `Successfully wrote file to: ${relativePath}` }]
 				};
 			} catch (err) {
 				return {
@@ -381,6 +419,13 @@ async function createMcpServer() {
 				if (!skipNpmInstall) {
 					const installCommand = `cd "${targetPath}" && npm install --no-audit --no-fund --progress=false`;
 					await execAsync(installCommand);
+				}
+
+				if (!fs.existsSync(path.resolve(targetPath, "game.json"))) {
+					return {
+						content: [{ type: "text", text: "Error during initialization: game.json was not created in the project root." }],
+						isError: true,
+					};
 				}
 
 				return {
@@ -448,6 +493,13 @@ async function createMcpServer() {
 				fs.mkdirSync(scriptDir, { recursive: true });
 				fs.copyFileSync(templateGameJson, path.resolve(targetPath, "game.json"));
 				fs.copyFileSync(templateMain, path.resolve(scriptDir, "main.js"));
+
+				if (!fs.existsSync(path.resolve(targetPath, "game.json"))) {
+					return {
+						content: [{ type: "text", text: "Error during template initialization: game.json was not created in the project root." }],
+						isError: true,
+					};
+				}
 
 				return {
 					content: [{
@@ -1720,6 +1772,9 @@ ${apiSummaryIndexForPrompt}
      * 音声追加時は、ファイル形式をニコ生ゲーム対応の形式に変換するため、directoryName に音声の配置ディレクトリのパスを指定して run_complete_audio を実行する。
    * Akashic の拡張ライブラリが指定されている場合は、akashic_install_extension を使って導入する。
 5. **実装**：コードを書く際は create_game_file を使用する。
+   * create_game_file の directoryName は必ず targetDir と同じ値を指定する。
+   * create_game_file の filePath は project ルートからの相対パスだけを使う。
+   * game.json を扱う場合、filePath は必ず game.json にする。subdir/game.json のようなネストは禁止。
    * ロジックは main.ts または main.js に実装する。
      * main.ts / main.js が 500 行を超える場合は、クラスや関数を別ファイルに分割する。
        * クラス例：シーン、エンティティ
