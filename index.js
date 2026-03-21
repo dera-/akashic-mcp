@@ -291,13 +291,13 @@ async function createMcpServer() {
 		"create_game_file",
 		"Create or overwrite a source file for the game (e.g., src/main.ts, game.json).",
 		{
-			directoryName: z.string().describe("Project directory path (relative or absolute)."),
+			directoryName: z.string().optional().describe("Project directory path (relative or absolute). Recommended."),
 			filePath: z.string().describe("File path inside the project directory (e.g., 'script/main.js' or 'game.json')."),
 			code: z.string().describe("The full content of the file."),
 			forbidGameJsonUpdate: z.boolean().optional().describe("When true, prevents writing to game.json."),
 		},
 		async ({ directoryName, filePath, code, forbidGameJsonUpdate }) => {
-			if (!path.isAbsolute(directoryName) && directoryName.includes('..')) {
+			if (directoryName && !path.isAbsolute(directoryName) && directoryName.includes('..')) {
 				return {
 					content: [{ type: "text", text: "Error: Invalid directory name. Avoid '..' in relative paths." }],
 					isError: true
@@ -312,27 +312,45 @@ async function createMcpServer() {
 			}
 
 			try {
-				const targetPath = path.isAbsolute(directoryName)
-					? path.normalize(directoryName)
-					: path.resolve(process.cwd(), directoryName);
-				if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+				const fullPath = path.isAbsolute(filePath)
+					? path.normalize(filePath)
+					: null;
+				const inferProjectRoot = (startPath) => {
+					let currentDir = path.dirname(startPath);
+					for (let depth = 0; depth < 8; depth += 1) {
+						if (fs.existsSync(path.resolve(currentDir, "game.json"))) {
+							return currentDir;
+						}
+						const parentDir = path.dirname(currentDir);
+						if (parentDir === currentDir) {
+							break;
+						}
+						currentDir = parentDir;
+					}
+					return null;
+				};
+
+				const targetPath = directoryName
+					? (path.isAbsolute(directoryName)
+						? path.normalize(directoryName)
+						: path.resolve(process.cwd(), directoryName))
+					: (fullPath ? inferProjectRoot(fullPath) : null);
+				if (!targetPath || !fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
 					return {
-						content: [{ type: "text", text: `Error: Directory '${directoryName}' not found.` }],
+						content: [{ type: "text", text: "Error: Project directory could not be determined. Pass directoryName or use an absolute filePath inside a project." }],
 						isError: true
 					};
 				}
 
-				const fullPath = path.isAbsolute(filePath)
-					? path.normalize(filePath)
-					: path.resolve(targetPath, filePath);
-				if (!fullPath.startsWith(targetPath + path.sep) && fullPath !== targetPath) {
+				const resolvedFullPath = fullPath ?? path.resolve(targetPath, filePath);
+				if (!resolvedFullPath.startsWith(targetPath + path.sep) && resolvedFullPath !== targetPath) {
 					return {
 						content: [{ type: "text", text: "Error: filePath must be inside the project directory." }],
 						isError: true
 					};
 				}
 
-				const relativePath = path.relative(targetPath, fullPath).replace(/\\/g, "/");
+				const relativePath = path.relative(targetPath, resolvedFullPath).replace(/\\/g, "/");
 				if (!relativePath || relativePath.startsWith("..")) {
 					return {
 						content: [{ type: "text", text: "Error: filePath must be inside the project directory." }],
@@ -340,7 +358,7 @@ async function createMcpServer() {
 					};
 				}
 
-				if (path.basename(fullPath).toLowerCase() === "game.json" && relativePath !== "game.json") {
+				if (path.basename(resolvedFullPath).toLowerCase() === "game.json" && relativePath !== "game.json") {
 					return {
 						content: [{ type: "text", text: "Error: game.json must exist directly under the project directory." }],
 						isError: true,
@@ -352,13 +370,13 @@ async function createMcpServer() {
 						isError: true,
 					};
 				}
-				const dir = path.dirname(fullPath);
+				const dir = path.dirname(resolvedFullPath);
 				
 				if (!fs.existsSync(dir)) {
 					fs.mkdirSync(dir, { recursive: true });
 				}
 				
-				fs.writeFileSync(fullPath, code);
+				fs.writeFileSync(resolvedFullPath, code);
 				return {
 					content: [{ type: "text", text: `Successfully wrote file to: ${relativePath}` }]
 				};
