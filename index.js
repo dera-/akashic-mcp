@@ -1846,6 +1846,8 @@ ${apiSummaryIndexForPrompt}
   * 次の形式は使用しない：module.exports = function main(...) { ... }
 * game.json は基本的にテンプレートまたは既存プロジェクトのまま維持する。
   * 手動編集を許可するのは以下の場合のみ：
+    * 画面サイズ(width, height)を変更する
+    * ゲームのFPS数(fps)を変更する
     * アセットをグローバル化する（"global": true を追加）
     * type: "audio" のアセットの systemId を変更する
       * 音声をループする(BGMにする)時のみ、systemId を "music" に変更する
